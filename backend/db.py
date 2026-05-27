@@ -1,51 +1,109 @@
 import json
 import os
+import io
 from typing import Optional
 
 INDEX_CHANNEL_ID = int(os.getenv("INDEX_CHANNEL_ID", "-1003897388411"))
-INDEX_MESSAGE_ID = int(os.getenv("INDEX_MESSAGE_ID", "4"))
 
 _index: dict = {"files": [], "next_id": 1}
+_index_msg_id: Optional[int] = None
 
 async def load_index(client):
-    global _index
+    global _index, _index_msg_id
     try:
         chat = await client.get_chat(INDEX_CHANNEL_ID)
         print(f"✅ Index channel: {chat.title}")
-        msg = await client.get_messages(INDEX_CHANNEL_ID, INDEX_MESSAGE_ID)
-        if msg and msg.text and msg.text.strip().startswith("{"):
-            _index = json.loads(msg.text.strip())
-            print(f"✅ Loaded index: {len(_index['files'])} files")
+
+        latest_msg = None
+        async for msg in client.get_chat_history(INDEX_CHANNEL_ID, limit=50):
+            if msg.document and msg.document.file_name == "index.json":
+                latest_msg = msg
+                break
+
+        if latest_msg:
+            _index_msg_id = latest_msg.id
+            file_bytes = await client.download_media(latest_msg, in_memory=True)
+            data = bytes(file_bytes.getbuffer())
+            _index = json.loads(data.decode("utf-8"))
+            print(f"✅ Loaded index from msg {_index_msg_id}: {len(_index['files'])} files")
         else:
-            print("⚠️  Index message empty, starting fresh")
+            print("⚠️  No index.json found, starting fresh")
+            _index = {"files": [], "next_id": 1}
     except Exception as e:
         print(f"⚠️  Could not load index: {e}, starting fresh")
+        _index = {"files": [], "next_id": 1}
     _index.setdefault("files", [])
     _index.setdefault("next_id", 1)
 
 async def save_index(client):
+    global _index_msg_id
     try:
-        text = json.dumps(_index, ensure_ascii=False)
-        if len(text) > 4000:
-            import io
-            bio = io.BytesIO(text.encode())
-            bio.name = "index.json"
-            await client.send_document(chat_id=INDEX_CHANNEL_ID, document=bio, caption="AirDrive Index")
-            print("✅ Index saved as file")
-        else:
-            await client.edit_message_text(chat_id=INDEX_CHANNEL_ID, message_id=INDEX_MESSAGE_ID, text=text)
-            print(f"✅ Index saved: {len(_index['files'])} files")
+        text = json.dumps(_index, ensure_ascii=False).encode("utf-8")
+        bio = io.BytesIO(text)
+        bio.name = "index.json"
+
+        if _index_msg_id:
+            try:
+                from pyrogram.types import InputMediaDocument
+                bio.seek(0)
+                await client.edit_message_media(
+                    chat_id=INDEX_CHANNEL_ID,
+                    message_id=_index_msg_id,
+                    media=InputMediaDocument(media=bio, file_name="index.json"),
+                )
+                print(f"✅ Index updated msg {_index_msg_id}: {len(_index['files'])} files")
+                return
+            except Exception as e:
+                print(f"⚠️  Edit failed: {e}, sending new")
+
+        bio.seek(0)
+        new_msg = await client.send_document(
+            chat_id=INDEX_CHANNEL_ID,
+            document=bio,
+            file_name="index.json",
+            caption="AirDrive Index",
+        )
+        old_id = _index_msg_id
+        _index_msg_id = new_msg.id
+        if old_id and old_id != new_msg.id:
+            try:
+                await client.delete_messages(INDEX_CHANNEL_ID, old_id)
+            except: pass
+        print(f"✅ Index saved new msg {_index_msg_id}: {len(_index['files'])} files")
     except Exception as e:
         print(f"❌ Save failed: {e}")
 
+async def cleanup_old_indexes(client):
+    deleted = 0
+    try:
+        to_delete = []
+        async for msg in client.get_chat_history(INDEX_CHANNEL_ID, limit=100):
+            if msg.document and msg.document.file_name == "index.json":
+                if msg.id != _index_msg_id:
+                    to_delete.append(msg.id)
+        if to_delete:
+            await client.delete_messages(INDEX_CHANNEL_ID, to_delete)
+            deleted = len(to_delete)
+        print(f"🧹 Deleted {deleted} old indexes")
+    except Exception as e:
+        print(f"⚠️  Cleanup failed: {e}")
+    return deleted
+
 async def upsert_file(data: dict):
     global _index
+    msg_id = data.get("message_id")
+    ch_id = data.get("channel_id")
     for i, f in enumerate(_index["files"]):
-        if f.get("file_id") == data.get("file_id"):
-            _index["files"][i] = {**f, **data}
+        if f.get("message_id") == msg_id and f.get("channel_id") == ch_id:
+            _index["files"][i] = {**f, **data, "id": f["id"]}
             return
     _index["files"].append({"id": _index["next_id"], **data})
     _index["next_id"] += 1
+
+async def clear_index(client):
+    global _index
+    _index = {"files": [], "next_id": 1}
+    await save_index(client)
 
 def _filter(files, category=None, q=None):
     if category:
