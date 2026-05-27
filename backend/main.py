@@ -40,20 +40,21 @@ async def lifespan(app: FastAPI):
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=SESSION_STRING,
-        no_updates=True,
     )
     await pyro_client.start()
     print("✅ Pyrogram client started")
 
-    # BeyondDrive pattern: send a message to force channel resolution
-    # This is the key — it warms up the session cache before we try to read
+    # CRITICAL: get_dialogs populates the session's internal peer cache.
+    # Without this, session_string-based clients can't resolve channels.
+    print("🔄 Populating peer cache via get_dialogs...")
     try:
-        await pyro_client.send_message(db.INDEX_CHANNEL_ID, "🔄 AirDrive starting up...")
-        print("✅ Index channel warmed up via message")
+        count = 0
+        async for dialog in pyro_client.get_dialogs():
+            count += 1
+        print(f"✅ Loaded {count} dialogs into cache")
     except Exception as e:
-        print(f"⚠️  Warmup message failed: {e}")
+        print(f"⚠️  get_dialogs failed: {e}")
 
-    # Now load index — channel is resolved
     await db.load_index(pyro_client)
 
     yield
