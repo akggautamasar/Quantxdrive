@@ -1,13 +1,16 @@
 """
 Database layer using Telegram channel as persistent storage.
 The index is stored as a JSON message in AirDrive Index channel.
-Message ID 3 is the index message we update in place.
+Configure via env variables:
+  INDEX_CHANNEL_ID — channel where index is stored
+  INDEX_MESSAGE_ID — message ID of the {} text message in that channel
 """
 import json
+import os
 from typing import Optional
 
-INDEX_CHANNEL_ID = -1003897388411
-INDEX_MESSAGE_ID = 3  # The message in AirDrive Index where JSON is stored
+INDEX_CHANNEL_ID = int(os.getenv("INDEX_CHANNEL_ID", "-1003897388411"))
+INDEX_MESSAGE_ID = int(os.getenv("INDEX_MESSAGE_ID", "3"))
 
 # In-memory index — loaded from Telegram on startup
 _index: dict = {
