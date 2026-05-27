@@ -107,7 +107,7 @@ function FileCard({ file, token, onPreview }) {
   const canPreview = isImage || isVideo || isAudio;
 
   return (
-    <div className="file-card" onClick={() => canPreview && onPreview(file)}>
+    <div className="file-card" data-cat={file.category} onClick={() => canPreview && onPreview(file)}> canPreview && onPreview(file)}>
       <div className={`file-thumb ${isImage ? "file-thumb--image" : ""}`}>
         {isImage ? (
           <img
