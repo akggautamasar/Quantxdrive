@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pyrogram import Client
-import os, math, jwt, mimetypes, asyncio
+import os, math, jwt, mimetypes, asyncio, secrets, time
 from datetime import datetime, timedelta
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
@@ -85,49 +85,9 @@ def verify_token(c: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="Not authenticated")
     return True
 
-# ── Health ────────────────────────────────────────────────────────────────────
-
 @app.get("/")
 async def health():
     return {"status": "AirDrive API running"}
-
-# ── Debug (no auth — remove or protect after fixing) ─────────────────────────
-
-@app.get("/api/debug")
-async def debug_duplicates():
-    from collections import Counter
-    files = db._index.get("files", [])
-    key_counts = Counter((f.get("channel_id"), f.get("message_id")) for f in files)
-    duplicates = {f"{k[0]}/{k[1]}": v for k, v in key_counts.items() if v > 1}
-    sample = [{"id": f.get("id"), "msg": f.get("message_id"), "ch": f.get("channel_id"),
-               "name": f.get("filename"), "cat": f.get("category")} for f in files[:10]]
-    return {
-        "total_files": len(files),
-        "unique_keys": len(key_counts),
-        "duplicate_count": len(duplicates),
-        "duplicates": dict(list(duplicates.items())[:10]),
-        "sample_files": sample,
-    }
-
-@app.get("/api/dedupe-now")
-async def dedupe_now():
-    """Public dedupe endpoint — removes duplicates. Remove after one-time cleanup."""
-    seen = {}
-    deduped = []
-    for f in db._index["files"]:
-        key = (f.get("channel_id"), f.get("message_id"))
-        if key not in seen:
-            seen[key] = True
-            deduped.append(f)
-    before = len(db._index["files"])
-    db._index["files"] = deduped
-    for i, f in enumerate(deduped, start=1):
-        f["id"] = i
-    db._index["next_id"] = len(deduped) + 1
-    await db.save_index(pyro_client)
-    return {"before": before, "after": len(deduped), "removed": before - len(deduped)}
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/login")
 async def login(body: dict):
@@ -135,39 +95,9 @@ async def login(body: dict):
         raise HTTPException(status_code=401, detail="Wrong password")
     return {"token": create_token()}
 
-# ── Index management ─────────────────────────────────────────────────────────
-
-@app.post("/api/reset")
-async def reset(_: bool = Depends(verify_token)):
-    await db.clear_index(pyro_client)
-    return {"status": "index cleared"}
-
-@app.post("/api/cleanup")
-async def cleanup(_: bool = Depends(verify_token)):
-    deleted = await db.cleanup_old_indexes(pyro_client)
-    return {"deleted": deleted}
-
-@app.post("/api/dedupe")
-async def dedupe_authed(_: bool = Depends(verify_token)):
-    seen = {}
-    deduped = []
-    for f in db._index["files"]:
-        key = (f.get("channel_id"), f.get("message_id"))
-        if key not in seen:
-            seen[key] = True
-            deduped.append(f)
-    before = len(db._index["files"])
-    db._index["files"] = deduped
-    for i, f in enumerate(deduped, start=1):
-        f["id"] = i
-    db._index["next_id"] = len(deduped) + 1
-    await db.save_index(pyro_client)
-    return {"before": before, "after": len(deduped), "removed": before - len(deduped)}
-
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
 async def _do_sync_channel(category: str):
-    """Internal sync logic — must be called inside _sync_lock."""
     channel_id = CHANNELS[category]
     count = 0
     async for message in pyro_client.get_chat_history(channel_id):
@@ -193,17 +123,6 @@ async def _do_sync_channel(category: str):
         count += 1
     return count
 
-@app.post("/api/sync")
-async def sync_channel(category: str, _: bool = Depends(verify_token)):
-    if category not in CHANNELS:
-        raise HTTPException(status_code=400, detail="Unknown category")
-    if _sync_lock.locked():
-        raise HTTPException(status_code=409, detail="Sync already running")
-    async with _sync_lock:
-        count = await _do_sync_channel(category)
-        await db.save_index(pyro_client)
-    return {"synced": count, "category": category}
-
 @app.post("/api/sync/all")
 async def sync_all(_: bool = Depends(verify_token)):
     if _sync_lock.locked():
@@ -219,25 +138,103 @@ async def sync_all(_: bool = Depends(verify_token)):
         await db.save_index(pyro_client)
     return results
 
-# ── Files ─────────────────────────────────────────────────────────────────────
+# ── Files (with sort and filter) ─────────────────────────────────────────────
 
 @app.get("/api/files")
-async def list_files(category: Optional[str] = None, q: Optional[str] = None,
-                     page: int = 1, limit: int = 50, _: bool = Depends(verify_token)):
+async def list_files(
+    category: Optional[str] = None,
+    q: Optional[str] = None,
+    folder: Optional[str] = None,
+    favorites: bool = False,
+    sort_by: str = "date",     # date | name | size
+    sort_dir: str = "desc",    # asc | desc
+    page: int = 1, limit: int = 50,
+    _: bool = Depends(verify_token)
+):
     offset = (page - 1) * limit
-    files, total = await (db.search_files(q, category, limit, offset) if q else db.get_files(category, limit, offset))
+    files, total = await db.get_files_filtered(
+        category=category, q=q, folder=folder, favorites=favorites,
+        sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset
+    )
     return {"files": files, "total": total, "page": page, "pages": -(-total // limit)}
 
 @app.get("/api/stats")
 async def stats(_: bool = Depends(verify_token)):
     return await db.get_stats()
 
-# ── Stream ────────────────────────────────────────────────────────────────────
+# ── Favorites ─────────────────────────────────────────────────────────────────
 
-@app.get("/api/media/{token}/{file_db_id}")
-async def media_stream(token: str, file_db_id: int, request: Request):
-    if not verify_jwt(token):
-        raise HTTPException(status_code=401, detail="Invalid token")
+@app.post("/api/favorite/{file_id}")
+async def toggle_favorite(file_id: int, _: bool = Depends(verify_token)):
+    result = await db.toggle_favorite(file_id)
+    await db.save_index(pyro_client)
+    return {"file_id": file_id, "favorited": result}
+
+# ── Folders ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/folders")
+async def list_folders(_: bool = Depends(verify_token)):
+    return {"folders": db._index.get("folders", [])}
+
+@app.post("/api/folders")
+async def create_folder(body: dict, _: bool = Depends(verify_token)):
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    folder = await db.create_folder(name)
+    await db.save_index(pyro_client)
+    return folder
+
+@app.delete("/api/folders/{folder_id}")
+async def delete_folder(folder_id: str, _: bool = Depends(verify_token)):
+    await db.delete_folder(folder_id)
+    await db.save_index(pyro_client)
+    return {"deleted": folder_id}
+
+@app.post("/api/files/{file_id}/folder")
+async def move_to_folder(file_id: int, body: dict, _: bool = Depends(verify_token)):
+    folder_id = body.get("folder_id")  # None to remove from folder
+    await db.move_file_to_folder(file_id, folder_id)
+    await db.save_index(pyro_client)
+    return {"file_id": file_id, "folder_id": folder_id}
+
+# ── Sharing ───────────────────────────────────────────────────────────────────
+
+@app.post("/api/share/{file_id}")
+async def create_share(file_id: int, body: dict = None, _: bool = Depends(verify_token)):
+    body = body or {}
+    expires_in = body.get("expires_in", 86400 * 7)  # 7 days default
+    token = secrets.token_urlsafe(16)
+    expiry = int(time.time()) + expires_in
+    await db.add_share(token, file_id, expiry)
+    await db.save_index(pyro_client)
+    return {"share_token": token, "expires_at": expiry}
+
+@app.get("/api/shared/{share_token}")
+async def get_shared_info(share_token: str):
+    share = await db.get_share(share_token)
+    if not share:
+        raise HTTPException(status_code=404, detail="Invalid or expired link")
+    file = await db.get_file_by_id(share["file_id"])
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {
+        "filename": file["filename"],
+        "size": file.get("size", 0),
+        "mime": file.get("mime", ""),
+        "category": file.get("category", ""),
+    }
+
+@app.get("/api/shared/{share_token}/stream")
+async def shared_stream(share_token: str, request: Request):
+    share = await db.get_share(share_token)
+    if not share:
+        raise HTTPException(status_code=404, detail="Invalid or expired link")
+    return await _stream_file(share["file_id"], request)
+
+# ── Streaming logic ───────────────────────────────────────────────────────────
+
+async def _stream_file(file_db_id: int, request: Request):
     file = await db.get_file_by_id(file_db_id)
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
@@ -303,3 +300,9 @@ async def media_stream(token: str, file_db_id: int, request: Request):
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
 
     return StreamingResponse(generator(), status_code=status, headers=headers, media_type=mime_type)
+
+@app.get("/api/media/{token}/{file_db_id}")
+async def media_stream(token: str, file_db_id: int, request: Request):
+    if not verify_jwt(token):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return await _stream_file(file_db_id, request)
