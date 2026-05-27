@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, Query
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -28,6 +28,7 @@ CHANNELS = {
     "pdfs":            -1003416055978,
     "audio":           -1003935949819,
 }
+CHANNEL_TO_CATEGORY = {v: k for k, v in CHANNELS.items()}
 
 MIME_MAP = {
     '.mp4':'video/mp4','.mkv':'video/x-matroska','.webm':'video/webm','.mov':'video/quicktime',
@@ -50,46 +51,37 @@ async def lifespan(app: FastAPI):
     print("🚀 Starting AirDrive...")
     pyro_client = Client(name="airdrive_render", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
     await pyro_client.start()
-    print("✅ Pyrogram client started")
-    print("🔄 Populating peer cache...")
+    print("✅ Pyrogram started")
     try:
         count = 0
         async for _ in pyro_client.get_dialogs():
             count += 1
         print(f"✅ Loaded {count} dialogs")
     except Exception as e:
-        print(f"⚠️  get_dialogs failed: {e}")
+        print(f"⚠️  {e}")
     await db.load_index(pyro_client)
     yield
     await pyro_client.stop()
 
 app = FastAPI(title="AirDrive API", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"],
+                   expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"])
 security = HTTPBearer(auto_error=False)
 
-def create_token(days=30):
-    return jwt.encode({"exp": datetime.utcnow() + timedelta(days=days), "iat": datetime.utcnow()}, JWT_SECRET, algorithm="HS256")
+def create_token():
+    return jwt.encode({"exp": datetime.utcnow() + timedelta(days=30), "iat": datetime.utcnow()}, JWT_SECRET, algorithm="HS256")
 
 def verify_jwt(token: str):
     try:
         jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return True
-    except:
-        return False
+    except: return False
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not credentials or not verify_jwt(credentials.credentials):
+def verify_token(c: HTTPAuthorizationCredentials = Depends(security)):
+    if not c or not verify_jwt(c.credentials):
         raise HTTPException(status_code=401, detail="Not authenticated")
     return True
-
-# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def health():
@@ -101,16 +93,15 @@ async def login(body: dict):
         raise HTTPException(status_code=401, detail="Wrong password")
     return {"token": create_token()}
 
-@app.get("/api/resolve")
-async def resolve():
-    results = {}
-    for cid in list(CHANNELS.values()) + [db.INDEX_CHANNEL_ID]:
-        try:
-            chat = await pyro_client.get_chat(cid)
-            results[str(cid)] = chat.title
-        except Exception as e:
-            results[str(cid)] = f"ERROR: {e}"
-    return results
+@app.post("/api/reset")
+async def reset(_: bool = Depends(verify_token)):
+    await db.clear_index(pyro_client)
+    return {"status": "index cleared"}
+
+@app.post("/api/cleanup")
+async def cleanup(_: bool = Depends(verify_token)):
+    deleted = await db.cleanup_old_indexes(pyro_client)
+    return {"deleted": deleted}
 
 @app.post("/api/sync")
 async def sync_channel(category: str, _: bool = Depends(verify_token)):
@@ -129,9 +120,14 @@ async def sync_channel(category: str, _: bool = Depends(verify_token)):
         else:
             filename = f"photo_{message.id}.jpg"
             size, file_id, mime = photo.file_size or 0, photo.file_id, "image/jpeg"
-        await db.upsert_file({"message_id": message.id, "channel_id": channel_id, "category": category,
-                               "filename": filename, "file_id": file_id, "size": size, "mime": mime,
-                               "date": message.date.isoformat() if message.date else "", "caption": message.caption or ""})
+
+        actual_cat = CHANNEL_TO_CATEGORY.get(channel_id, category)
+        await db.upsert_file({
+            "message_id": message.id, "channel_id": channel_id, "category": actual_cat,
+            "filename": filename, "file_id": file_id, "size": size, "mime": mime,
+            "date": message.date.isoformat() if message.date else "",
+            "caption": message.caption or "",
+        })
         count += 1
     return {"synced": count, "category": category}
 
@@ -157,14 +153,10 @@ async def list_files(category: Optional[str] = None, q: Optional[str] = None, pa
 async def stats(_: bool = Depends(verify_token)):
     return await db.get_stats()
 
-# ── Token-based media streaming (works with <img>, <video>, <audio>) ─────────
-
 @app.get("/api/media/{token}/{file_db_id}")
 async def media_stream(token: str, file_db_id: int, request: Request):
-    """Stream files via URL token — works for <img>, <video>, <audio>, <iframe> tags."""
     if not verify_jwt(token):
         raise HTTPException(status_code=401, detail="Invalid token")
-
     file = await db.get_file_by_id(file_db_id)
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
@@ -173,27 +165,23 @@ async def media_stream(token: str, file_db_id: int, request: Request):
     mime_type = file.get("mime") or get_mime(file["filename"])
     range_header = request.headers.get("range") or request.headers.get("Range")
 
-    # Parse range request
-    start, end = 0, file_size - 1
+    start, end = 0, max(0, file_size - 1)
     if range_header and range_header.startswith("bytes="):
         try:
-            range_spec = range_header[6:]
-            if range_spec.startswith("-"):
-                start = max(0, file_size - int(range_spec[1:]))
-            elif range_spec.endswith("-"):
-                start = int(range_spec[:-1])
+            rs = range_header[6:]
+            if rs.startswith("-"):
+                start = max(0, file_size - int(rs[1:]))
+            elif rs.endswith("-"):
+                start = int(rs[:-1])
             else:
-                parts = range_spec.split("-", 1)
+                parts = rs.split("-", 1)
                 start = int(parts[0])
-                if parts[1]:
-                    end = int(parts[1])
-        except:
-            pass
+                if parts[1]: end = int(parts[1])
+        except: pass
 
     start = max(0, min(start, file_size - 1))
     end = max(start, min(end, file_size - 1))
 
-    # Calculate chunk parameters
     chunk_size = 1024 * 1024
     offset = start - (start % chunk_size)
     first_cut = start - offset
@@ -206,8 +194,7 @@ async def media_stream(token: str, file_db_id: int, request: Request):
         current = 1
         try:
             async for chunk in pyro_client.stream_media(file["file_id"], offset=chunk_offset, limit=part_count):
-                if not chunk:
-                    break
+                if not chunk: break
                 if part_count == 1:
                     yield chunk[first_cut:last_cut]
                 elif current == 1:
@@ -218,7 +205,7 @@ async def media_stream(token: str, file_db_id: int, request: Request):
                     yield chunk
                 current += 1
         except Exception as e:
-            print(f"Stream error: {e}")
+            print(f"Stream err: {e}")
 
     is_range = bool(range_header)
     status = 206 if is_range else 200
@@ -235,15 +222,3 @@ async def media_stream(token: str, file_db_id: int, request: Request):
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
 
     return StreamingResponse(generator(), status_code=status, headers=headers, media_type=mime_type)
-
-# Old endpoint kept for compat
-@app.get("/api/stream/{file_db_id}")
-async def stream_old(file_db_id: int, request: Request, _: bool = Depends(verify_token)):
-    # Redirect to new endpoint with token in URL
-    auth = request.headers.get("authorization", "").replace("Bearer ", "")
-    return await media_stream(auth, file_db_id, request)
-
-@app.get("/api/download/{file_db_id}")
-async def download_old(file_db_id: int, request: Request, _: bool = Depends(verify_token)):
-    auth = request.headers.get("authorization", "").replace("Bearer ", "")
-    return await media_stream(auth, file_db_id, request)
