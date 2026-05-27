@@ -1,12 +1,13 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pyrogram import Client
-import os, asyncio, jwt
+import os, math, jwt, mimetypes
 from datetime import datetime, timedelta
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 from dotenv import load_dotenv
 import db
 
@@ -28,57 +29,77 @@ CHANNELS = {
     "audio":           -1003935949819,
 }
 
+MIME_MAP = {
+    '.mp4':'video/mp4','.mkv':'video/x-matroska','.webm':'video/webm','.mov':'video/quicktime',
+    '.m4v':'video/mp4','.avi':'video/x-msvideo','.3gp':'video/3gpp',
+    '.mp3':'audio/mpeg','.wav':'audio/wav','.flac':'audio/flac','.aac':'audio/aac',
+    '.ogg':'audio/ogg','.m4a':'audio/mp4','.opus':'audio/ogg',
+    '.pdf':'application/pdf','.epub':'application/epub+zip',
+    '.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.gif':'image/gif','.webp':'image/webp',
+}
+
+def get_mime(filename):
+    ext = os.path.splitext(filename.lower())[1]
+    return MIME_MAP.get(ext) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
 pyro_client: Optional[Client] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pyro_client
     print("🚀 Starting AirDrive...")
-
-    pyro_client = Client(
-        name="airdrive_render",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-    )
+    pyro_client = Client(name="airdrive_render", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
     await pyro_client.start()
     print("✅ Pyrogram client started")
-
-    # CRITICAL: get_dialogs populates the session's internal peer cache.
-    # Without this, session_string-based clients can't resolve channels.
-    print("🔄 Populating peer cache via get_dialogs...")
+    print("🔄 Populating peer cache...")
     try:
         count = 0
-        async for dialog in pyro_client.get_dialogs():
+        async for _ in pyro_client.get_dialogs():
             count += 1
-        print(f"✅ Loaded {count} dialogs into cache")
+        print(f"✅ Loaded {count} dialogs")
     except Exception as e:
         print(f"⚠️  get_dialogs failed: {e}")
-
     await db.load_index(pyro_client)
-
     yield
-
     await pyro_client.stop()
-    print("🛑 Stopped")
 
 app = FastAPI(title="AirDrive API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-security = HTTPBearer()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
+)
+security = HTTPBearer(auto_error=False)
 
-def create_token():
-    return jwt.encode({"exp": datetime.utcnow() + timedelta(days=30), "iat": datetime.utcnow()}, JWT_SECRET, algorithm="HS256")
+def create_token(days=30):
+    return jwt.encode({"exp": datetime.utcnow() + timedelta(days=days), "iat": datetime.utcnow()}, JWT_SECRET, algorithm="HS256")
+
+def verify_jwt(token: str):
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return True
+    except:
+        return False
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
-    except:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    if not credentials or not verify_jwt(credentials.credentials):
+        raise HTTPException(status_code=401, detail="Not authenticated")
     return True
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def health():
     return {"status": "AirDrive API running"}
+
+@app.post("/api/login")
+async def login(body: dict):
+    if body.get("password") != APP_PASSWORD:
+        raise HTTPException(status_code=401, detail="Wrong password")
+    return {"token": create_token()}
 
 @app.get("/api/resolve")
 async def resolve():
@@ -90,12 +111,6 @@ async def resolve():
         except Exception as e:
             results[str(cid)] = f"ERROR: {e}"
     return results
-
-@app.post("/api/login")
-async def login(body: dict):
-    if body.get("password") != APP_PASSWORD:
-        raise HTTPException(status_code=401, detail="Wrong password")
-    return {"token": create_token()}
 
 @app.post("/api/sync")
 async def sync_channel(category: str, _: bool = Depends(verify_token)):
@@ -110,7 +125,7 @@ async def sync_channel(category: str, _: bool = Depends(verify_token)):
             continue
         if doc:
             filename = doc.file_name or f"file_{message.id}"
-            size, file_id, mime = doc.file_size or 0, doc.file_id, doc.mime_type or ""
+            size, file_id, mime = doc.file_size or 0, doc.file_id, doc.mime_type or get_mime(filename)
         else:
             filename = f"photo_{message.id}.jpg"
             size, file_id, mime = photo.file_size or 0, photo.file_id, "image/jpeg"
@@ -142,24 +157,93 @@ async def list_files(category: Optional[str] = None, q: Optional[str] = None, pa
 async def stats(_: bool = Depends(verify_token)):
     return await db.get_stats()
 
-@app.get("/api/stream/{file_db_id}")
-async def stream_file(file_db_id: int, _: bool = Depends(verify_token)):
+# ── Token-based media streaming (works with <img>, <video>, <audio>) ─────────
+
+@app.get("/api/media/{token}/{file_db_id}")
+async def media_stream(token: str, file_db_id: int, request: Request):
+    """Stream files via URL token — works for <img>, <video>, <audio>, <iframe> tags."""
+    if not verify_jwt(token):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
     file = await db.get_file_by_id(file_db_id)
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
-    async def gen() -> AsyncGenerator[bytes, None]:
-        async for chunk in pyro_client.stream_media(file["file_id"], limit=512):
-            yield chunk
-    return StreamingResponse(gen(), media_type=file.get("mime") or "application/octet-stream",
-                             headers={"Content-Disposition": f'inline; filename="{file["filename"]}"'})
+
+    file_size = file.get("size", 0)
+    mime_type = file.get("mime") or get_mime(file["filename"])
+    range_header = request.headers.get("range") or request.headers.get("Range")
+
+    # Parse range request
+    start, end = 0, file_size - 1
+    if range_header and range_header.startswith("bytes="):
+        try:
+            range_spec = range_header[6:]
+            if range_spec.startswith("-"):
+                start = max(0, file_size - int(range_spec[1:]))
+            elif range_spec.endswith("-"):
+                start = int(range_spec[:-1])
+            else:
+                parts = range_spec.split("-", 1)
+                start = int(parts[0])
+                if parts[1]:
+                    end = int(parts[1])
+        except:
+            pass
+
+    start = max(0, min(start, file_size - 1))
+    end = max(start, min(end, file_size - 1))
+
+    # Calculate chunk parameters
+    chunk_size = 1024 * 1024
+    offset = start - (start % chunk_size)
+    first_cut = start - offset
+    last_cut = (end % chunk_size) + 1
+    part_count = math.ceil((end + 1) / chunk_size) - math.floor(offset / chunk_size)
+    content_length = end - start + 1
+
+    async def generator():
+        chunk_offset = offset // chunk_size
+        current = 1
+        try:
+            async for chunk in pyro_client.stream_media(file["file_id"], offset=chunk_offset, limit=part_count):
+                if not chunk:
+                    break
+                if part_count == 1:
+                    yield chunk[first_cut:last_cut]
+                elif current == 1:
+                    yield chunk[first_cut:]
+                elif current == part_count:
+                    yield chunk[:last_cut]
+                else:
+                    yield chunk
+                current += 1
+        except Exception as e:
+            print(f"Stream error: {e}")
+
+    is_range = bool(range_header)
+    status = 206 if is_range else 200
+    disposition = "inline" if any(x in mime_type for x in ["video/", "audio/", "image/", "pdf", "epub", "/html"]) else "attachment"
+
+    headers = {
+        "Content-Type": mime_type,
+        "Content-Length": str(content_length),
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f'{disposition}; filename="{quote(file["filename"])}"',
+        "Cache-Control": "public, max-age=3600",
+    }
+    if is_range:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+    return StreamingResponse(generator(), status_code=status, headers=headers, media_type=mime_type)
+
+# Old endpoint kept for compat
+@app.get("/api/stream/{file_db_id}")
+async def stream_old(file_db_id: int, request: Request, _: bool = Depends(verify_token)):
+    # Redirect to new endpoint with token in URL
+    auth = request.headers.get("authorization", "").replace("Bearer ", "")
+    return await media_stream(auth, file_db_id, request)
 
 @app.get("/api/download/{file_db_id}")
-async def download_file(file_db_id: int, _: bool = Depends(verify_token)):
-    file = await db.get_file_by_id(file_db_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="File not found")
-    async def gen() -> AsyncGenerator[bytes, None]:
-        async for chunk in pyro_client.stream_media(file["file_id"]):
-            yield chunk
-    return StreamingResponse(gen(), media_type="application/octet-stream",
-                             headers={"Content-Disposition": f'attachment; filename="{file["filename"]}"'})
+async def download_old(file_db_id: int, request: Request, _: bool = Depends(verify_token)):
+    auth = request.headers.get("authorization", "").replace("Bearer ", "")
+    return await media_stream(auth, file_db_id, request)
