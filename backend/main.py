@@ -224,7 +224,7 @@ async def health():
 @app.get("/api/resolve")
 async def resolve_channels():
     results = {}
-    channel_ids = list(CHANNELS.values()) + [INDEX_CHANNEL_ID]
+    channel_ids = list(CHANNELS.values()) + [-1003897388411]
     for cid in channel_ids:
         try:
             chat = await pyro_client.get_chat(cid)
