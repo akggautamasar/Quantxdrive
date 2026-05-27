@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pyrogram
+tgcrypto
+aiosqlite
+python-jose[cryptography]
+pyjwt
+python-dotenv
+httpx

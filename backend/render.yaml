@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: airdrive-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: API_ID
+        value: 26182818
+      - key: API_HASH
+        value: e98cc55fabed0fce53269188fa3a0e63
+      - key: JWT_SECRET
+        generateValue: true
+      - key: APP_PASSWORD
+        value: Airlocked@6279
+      - key: SESSION_STRING
+        value: PASTE_YOUR_SESSION_STRING_HERE
