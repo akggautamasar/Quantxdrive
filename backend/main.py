@@ -221,3 +221,14 @@ async def download_file(file_db_id: int, _: bool = Depends(verify_token)):
 @app.get("/")
 async def health():
     return {"status": "AirDrive API running"}
+@app.get("/api/resolve")
+async def resolve_channels():
+    results = {}
+    channel_ids = list(CHANNELS.values()) + [INDEX_CHANNEL_ID]
+    for cid in channel_ids:
+        try:
+            chat = await pyro_client.get_chat(cid)
+            results[str(cid)] = chat.title
+        except Exception as e:
+            results[str(cid)] = f"ERROR: {str(e)}"
+    return results
