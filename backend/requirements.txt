@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 pyrogram==2.0.106
 tgcrypto
-aiosqlite
 pyjwt
 python-dotenv
 httpx
