@@ -1,39 +1,40 @@
-import json
-import os
-import io
+import json, os, io, time, uuid
 from typing import Optional
 
 INDEX_CHANNEL_ID = int(os.getenv("INDEX_CHANNEL_ID", "-1003897388411"))
 
-_index: dict = {"files": [], "next_id": 1}
+_index: dict = {"files": [], "next_id": 1, "folders": [], "shares": {}}
 _index_msg_id: Optional[int] = None
+
+def _ensure_keys():
+    _index.setdefault("files", [])
+    _index.setdefault("next_id", 1)
+    _index.setdefault("folders", [])
+    _index.setdefault("shares", {})
 
 async def load_index(client):
     global _index, _index_msg_id
     try:
         chat = await client.get_chat(INDEX_CHANNEL_ID)
         print(f"✅ Index channel: {chat.title}")
-
         latest_msg = None
         async for msg in client.get_chat_history(INDEX_CHANNEL_ID, limit=50):
             if msg.document and msg.document.file_name == "index.json":
                 latest_msg = msg
                 break
-
         if latest_msg:
             _index_msg_id = latest_msg.id
             file_bytes = await client.download_media(latest_msg, in_memory=True)
             data = bytes(file_bytes.getbuffer())
             _index = json.loads(data.decode("utf-8"))
-            print(f"✅ Loaded index from msg {_index_msg_id}: {len(_index['files'])} files")
+            print(f"✅ Loaded index msg {_index_msg_id}: {len(_index.get('files',[]))} files")
         else:
             print("⚠️  No index.json found, starting fresh")
-            _index = {"files": [], "next_id": 1}
+            _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
     except Exception as e:
-        print(f"⚠️  Could not load index: {e}, starting fresh")
-        _index = {"files": [], "next_id": 1}
-    _index.setdefault("files", [])
-    _index.setdefault("next_id", 1)
+        print(f"⚠️  Could not load index: {e}")
+        _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+    _ensure_keys()
 
 async def save_index(client):
     global _index_msg_id
@@ -41,56 +42,33 @@ async def save_index(client):
         text = json.dumps(_index, ensure_ascii=False).encode("utf-8")
         bio = io.BytesIO(text)
         bio.name = "index.json"
-
         if _index_msg_id:
             try:
                 from pyrogram.types import InputMediaDocument
                 bio.seek(0)
                 await client.edit_message_media(
-                    chat_id=INDEX_CHANNEL_ID,
-                    message_id=_index_msg_id,
+                    chat_id=INDEX_CHANNEL_ID, message_id=_index_msg_id,
                     media=InputMediaDocument(media=bio, file_name="index.json"),
                 )
                 print(f"✅ Index updated msg {_index_msg_id}: {len(_index['files'])} files")
                 return
             except Exception as e:
                 print(f"⚠️  Edit failed: {e}, sending new")
-
         bio.seek(0)
         new_msg = await client.send_document(
-            chat_id=INDEX_CHANNEL_ID,
-            document=bio,
-            file_name="index.json",
-            caption="AirDrive Index",
+            chat_id=INDEX_CHANNEL_ID, document=bio,
+            file_name="index.json", caption="AirDrive Index",
         )
         old_id = _index_msg_id
         _index_msg_id = new_msg.id
         if old_id and old_id != new_msg.id:
-            try:
-                await client.delete_messages(INDEX_CHANNEL_ID, old_id)
+            try: await client.delete_messages(INDEX_CHANNEL_ID, old_id)
             except: pass
-        print(f"✅ Index saved new msg {_index_msg_id}: {len(_index['files'])} files")
+        print(f"✅ Index saved new msg {_index_msg_id}")
     except Exception as e:
         print(f"❌ Save failed: {e}")
 
-async def cleanup_old_indexes(client):
-    deleted = 0
-    try:
-        to_delete = []
-        async for msg in client.get_chat_history(INDEX_CHANNEL_ID, limit=100):
-            if msg.document and msg.document.file_name == "index.json":
-                if msg.id != _index_msg_id:
-                    to_delete.append(msg.id)
-        if to_delete:
-            await client.delete_messages(INDEX_CHANNEL_ID, to_delete)
-            deleted = len(to_delete)
-        print(f"🧹 Deleted {deleted} old indexes")
-    except Exception as e:
-        print(f"⚠️  Cleanup failed: {e}")
-    return deleted
-
 async def upsert_file(data: dict):
-    global _index
     msg_id = data.get("message_id")
     ch_id = data.get("channel_id")
     for i, f in enumerate(_index["files"]):
@@ -100,25 +78,33 @@ async def upsert_file(data: dict):
     _index["files"].append({"id": _index["next_id"], **data})
     _index["next_id"] += 1
 
-async def clear_index(client):
-    global _index
-    _index = {"files": [], "next_id": 1}
-    await save_index(client)
+# ── Filtering & sorting ──────────────────────────────────────────────────────
 
-def _filter(files, category=None, q=None):
+async def get_files_filtered(category=None, q=None, folder=None, favorites=False,
+                             sort_by="date", sort_dir="desc", limit=50, offset=0):
+    files = _index["files"]
+
+    if favorites:
+        files = [f for f in files if f.get("favorite")]
+    if folder is not None:
+        if folder == "":
+            files = [f for f in files if not f.get("folder_id")]
+        else:
+            files = [f for f in files if f.get("folder_id") == folder]
     if category:
         files = [f for f in files if f.get("category") == category]
     if q:
         ql = q.lower()
         files = [f for f in files if ql in f.get("filename","").lower() or ql in f.get("caption","").lower()]
-    return files
 
-async def get_files(category, limit, offset):
-    files = sorted(_filter(_index["files"], category=category), key=lambda f: f.get("date",""), reverse=True)
-    return files[offset:offset+limit], len(files)
+    reverse = (sort_dir == "desc")
+    if sort_by == "name":
+        files = sorted(files, key=lambda f: f.get("filename","").lower(), reverse=reverse)
+    elif sort_by == "size":
+        files = sorted(files, key=lambda f: f.get("size", 0), reverse=reverse)
+    else:
+        files = sorted(files, key=lambda f: f.get("date",""), reverse=reverse)
 
-async def search_files(q, category, limit, offset):
-    files = sorted(_filter(_index["files"], category=category, q=q), key=lambda f: f.get("date",""), reverse=True)
     return files[offset:offset+limit], len(files)
 
 async def get_file_by_id(file_id: int):
@@ -136,8 +122,56 @@ async def get_stats():
             by_cat[cat] = {"category": cat, "count": 0, "total_size": 0}
         by_cat[cat]["count"] += 1
         by_cat[cat]["total_size"] += f.get("size", 0)
+    favs = sum(1 for f in files if f.get("favorite"))
     return {
         "by_category": list(by_cat.values()),
         "total_files": len(files),
         "total_size": sum(f.get("size", 0) for f in files),
+        "favorites_count": favs,
+        "folders_count": len(_index.get("folders", [])),
     }
+
+# ── Favorites ─────────────────────────────────────────────────────────────────
+
+async def toggle_favorite(file_id: int):
+    for f in _index["files"]:
+        if f.get("id") == file_id:
+            f["favorite"] = not f.get("favorite", False)
+            return f["favorite"]
+    return False
+
+# ── Folders ───────────────────────────────────────────────────────────────────
+
+async def create_folder(name: str):
+    fid = uuid.uuid4().hex[:10]
+    folder = {"id": fid, "name": name, "created_at": int(time.time())}
+    _index.setdefault("folders", []).append(folder)
+    return folder
+
+async def delete_folder(folder_id: str):
+    _index["folders"] = [f for f in _index.get("folders", []) if f["id"] != folder_id]
+    # Remove folder_id from all files
+    for f in _index["files"]:
+        if f.get("folder_id") == folder_id:
+            f["folder_id"] = None
+
+async def move_file_to_folder(file_id: int, folder_id):
+    for f in _index["files"]:
+        if f.get("id") == file_id:
+            f["folder_id"] = folder_id
+            return
+
+# ── Shares ────────────────────────────────────────────────────────────────────
+
+async def add_share(token: str, file_id: int, expires_at: int):
+    _index.setdefault("shares", {})[token] = {
+        "file_id": file_id, "expires_at": expires_at,
+    }
+
+async def get_share(token: str):
+    share = _index.get("shares", {}).get(token)
+    if not share:
+        return None
+    if share.get("expires_at", 0) < int(time.time()):
+        return None
+    return share
