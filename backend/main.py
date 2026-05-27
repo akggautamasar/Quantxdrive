@@ -152,7 +152,34 @@ async def list_files(category: Optional[str] = None, q: Optional[str] = None, pa
 @app.get("/api/stats")
 async def stats(_: bool = Depends(verify_token)):
     return await db.get_stats()
-
+@app.get("/api/debug")
+async def debug_duplicates():
+    """Public debug endpoint — check for duplicate files in index."""
+    from collections import Counter
+    files = db._index.get("files", [])
+    
+    # Count by (channel_id, message_id)
+    key_counts = Counter(
+        (f.get("channel_id"), f.get("message_id"))
+        for f in files
+    )
+    
+    duplicates = {f"{k[0]}/{k[1]}": v for k, v in key_counts.items() if v > 1}
+    
+    # Sample files
+    sample = [
+        {"id": f.get("id"), "msg": f.get("message_id"), "ch": f.get("channel_id"),
+         "name": f.get("filename"), "cat": f.get("category")}
+        for f in files[:10]
+    ]
+    
+    return {
+        "total_files": len(files),
+        "unique_keys": len(key_counts),
+        "duplicate_count": len(duplicates),
+        "duplicates": dict(list(duplicates.items())[:10]),
+        "sample_files": sample,
+    }
 @app.get("/api/media/{token}/{file_db_id}")
 async def media_stream(token: str, file_db_id: int, request: Request):
     if not verify_jwt(token):
