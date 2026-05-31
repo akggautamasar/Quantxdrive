@@ -36,8 +36,18 @@ async def load_index(client):
         _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
     _ensure_keys()
 
+def cleanup_expired_shares():
+    """Remove expired share tokens to keep index.json small."""
+    now = int(time.time())
+    expired = [k for k, v in _index.get("shares", {}).items() if v.get("expires_at", 0) < now]
+    for k in expired:
+        del _index["shares"][k]
+    if expired:
+        print(f"✅ Purged {len(expired)} expired shares")
+
 async def save_index(client):
     global _index_msg_id
+    cleanup_expired_shares()
     try:
         text = json.dumps(_index, ensure_ascii=False).encode("utf-8")
         bio = io.BytesIO(text)

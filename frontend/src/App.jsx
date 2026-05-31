@@ -44,14 +44,21 @@ const fmtDate = d => d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit
 // ── Login ─────────────────────────────────────────────────────────────────────
 function Login({ onLogin }) {
   const [pw, setPw] = useState(""); const [err, setErr] = useState(""); const [loading, setLoading] = useState(false);
+  const [slowWakeup, setSlowWakeup] = useState(false);
   const submit = async () => {
-    setLoading(true); setErr("");
+    setLoading(true); setErr(""); setSlowWakeup(false);
+    // Show a friendly message if the backend takes > 5 s (Render cold start)
+    const wakeTimer = setTimeout(() => setSlowWakeup(true), 5000);
     try {
       const res = await fetch(`${API}/api/login`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({password: pw}) });
+      clearTimeout(wakeTimer); setSlowWakeup(false);
       if (!res.ok) throw new Error();
       const { token } = await res.json();
       localStorage.setItem("ad_token", token); onLogin(token);
-    } catch { setErr("Wrong password"); }
+    } catch {
+      clearTimeout(wakeTimer); setSlowWakeup(false);
+      setErr("Wrong password");
+    }
     setLoading(false);
   };
   return (
@@ -66,6 +73,9 @@ function Login({ onLogin }) {
             onKeyDown={e=>e.key==="Enter" && submit()} style={S.input} autoFocus />
           <button style={S.btnP} onClick={submit} disabled={loading}>{loading?"…":"Unlock"}</button>
         </div>
+        {slowWakeup && <div style={{ color:"#e67e22", fontSize:12, fontWeight:700, background:"#fff8f0", padding:"8px 12px", borderRadius:8 }}>
+          Waking up backend… this takes ~30 s on first load.
+        </div>}
         {err && <div style={S.errBox}>{err}</div>}
       </div>
     </div>
@@ -76,6 +86,13 @@ function Login({ onLogin }) {
 function Card({ file, token, onPreview, onFav, onMenu }) {
   const kind = getKind(file); const col = getColor(file.category);
   const url = `${API}/api/media/${token}/${file.id}`;
+  // Large files (> 20 MB) can't be redirected to Telegram CDN, so the download
+  // button for them opens the file via tg_link to save Render bandwidth.
+  const isLarge = file.size > 20 * 1024 * 1024;
+  const dlHref = isLarge && file.tg_link ? file.tg_link : url;
+  const dlProps = isLarge && file.tg_link
+    ? { href: dlHref, target: "_blank", rel: "noopener noreferrer" }
+    : { href: dlHref, download: file.filename };
   return (
     <div style={{ ...S.card, borderColor: file.favorite ? "#ffc107" : "#e4e7f0" }} onClick={()=>onPreview(file)}>
       <div style={{ ...S.thumb, background: col.bg }}>
@@ -94,7 +111,12 @@ function Card({ file, token, onPreview, onFav, onMenu }) {
       </div>
       <div style={{ padding:"4px 8px 8px", display:"flex", gap:6, justifyContent:"flex-end" }}>
         <button onClick={e=>{ e.stopPropagation(); onMenu(file); }} style={{ ...S.smallBtn, background:"#f0f2f8", color:"#6b6b72" }}>⋯</button>
-        <a href={url} download={file.filename} onClick={e=>e.stopPropagation()} style={{ ...S.smallBtn, background:col.bg, color:col.text, textDecoration:"none" }}>↓</a>
+        {file.tg_link && (
+          <a href={file.tg_link} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}
+            title="Open in Telegram"
+            style={{ ...S.smallBtn, background:"#e8f4fd", color:"#229ED9", textDecoration:"none" }}>✈</a>
+        )}
+        <a {...dlProps} onClick={e=>e.stopPropagation()} style={{ ...S.smallBtn, background:col.bg, color:col.text, textDecoration:"none" }}>↓</a>
       </div>
     </div>
   );
@@ -228,7 +250,13 @@ function Preview({ file, token, onClose }) {
         <div style={S.vArea}>{render()}</div>
         <div style={S.modalFooter}>
           <span>{fmtSize(file.size)}</span><span>{fmtDate(file.date)}</span>
-          <a href={url} download={file.filename} style={{ ...S.btnP, marginLeft:"auto", padding:"7px 16px", textDecoration:"none", fontSize:13 }}>↓ Download</a>
+          {file.tg_link && (
+            <a href={file.tg_link} target="_blank" rel="noopener noreferrer"
+              style={{ ...S.btnP, padding:"7px 14px", textDecoration:"none", fontSize:13, background:"linear-gradient(135deg,#229ED9,#1a8bc4)", boxShadow:"0 4px 12px rgba(34,158,217,0.3)" }}>
+              ✈ Open in Telegram
+            </a>
+          )}
+          <a href={url} download={file.filename} style={{ ...S.btnP, marginLeft: file.tg_link ? 0 : "auto", padding:"7px 16px", textDecoration:"none", fontSize:13 }}>↓ Download</a>
         </div>
       </div>
     </div>

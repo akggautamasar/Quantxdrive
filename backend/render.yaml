@@ -2,6 +2,8 @@ services:
   - type: web
     name: airdrive-api
     env: python
+    plan: free
+    healthCheckPath: /
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -15,3 +17,7 @@ services:
         value: Airlocked@6279
       - key: SESSION_STRING
         value: PASTE_YOUR_SESSION_STRING_HERE
+      - key: BOT_TOKEN
+        value: PASTE_YOUR_BOT_TOKEN_HERE
+      - key: INDEX_CHANNEL_ID
+        value: "-1003897388411"
