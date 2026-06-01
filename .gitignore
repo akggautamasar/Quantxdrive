@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.env
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.production.local
+.cache/
+
+# Misc
+.DS_Store
+*.log
+.airdrive_session
