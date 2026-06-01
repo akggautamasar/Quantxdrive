@@ -97,6 +97,16 @@ async def lifespan(app: FastAPI):
     pyro_client = Client(name="airdrive_render", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
     await pyro_client.start()
     print("✅ Pyrogram started")
+    # get_dialogs() is required to populate Pyrogram's in-memory peer cache.
+    # Without it, the session string alone doesn't resolve channel IDs and every
+    # channel access raises "Peer id invalid". This must run before load_index.
+    try:
+        count = 0
+        async for _ in pyro_client.get_dialogs():
+            count += 1
+        print(f"✅ Peer cache ready ({count} dialogs)")
+    except Exception as e:
+        print(f"⚠️  Could not load dialogs: {e}")
     await db.load_index(pyro_client)
     yield
     await pyro_client.stop()
