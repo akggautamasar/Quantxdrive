@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pyrogram import Client
-import os, math, jwt, mimetypes, asyncio, secrets, time, httpx
+import os, math, jwt, mimetypes, asyncio, secrets, time, httpx, hashlib
 from datetime import datetime, timedelta
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
@@ -255,12 +255,14 @@ async def move_to_folder(file_id: int, body: dict, _: bool = Depends(verify_toke
 @app.post("/api/share/{file_id}")
 async def create_share(file_id: int, body: dict = None, _: bool = Depends(verify_token)):
     body = body or {}
-    expires_in = body.get("expires_in", 86400 * 7)  # 7 days default
+    expires_in = int(body.get("expires_in", 86400 * 7))
+    password = body.get("password", "")
+    password_hash = hashlib.sha256(password.encode()).hexdigest() if password else ""
     token = secrets.token_urlsafe(16)
     expiry = int(time.time()) + expires_in
-    await db.add_share(token, file_id, expiry)
+    await db.add_share(token, file_id, expiry, password_hash)
     await db.save_index(pyro_client)
-    return {"share_token": token, "expires_at": expiry}
+    return {"share_token": token, "expires_at": expiry, "password_protected": bool(password)}
 
 @app.get("/api/shared/{share_token}")
 async def get_shared_info(share_token: str):
@@ -275,14 +277,50 @@ async def get_shared_info(share_token: str):
         "size": file.get("size", 0),
         "mime": file.get("mime", ""),
         "category": file.get("category", ""),
+        "password_protected": bool(share.get("password_hash", "")),
     }
 
-@app.get("/api/shared/{share_token}/stream")
-async def shared_stream(share_token: str, request: Request):
+@app.post("/api/shared/{share_token}/verify")
+async def verify_share_password(share_token: str, body: dict):
     share = await db.get_share(share_token)
     if not share:
         raise HTTPException(status_code=404, detail="Invalid or expired link")
+    password_hash = share.get("password_hash", "")
+    if not password_hash:
+        return {"valid": True}
+    submitted = hashlib.sha256(body.get("password", "").encode()).hexdigest()
+    if submitted != password_hash:
+        raise HTTPException(status_code=401, detail="Wrong password")
+    return {"valid": True}
+
+@app.get("/api/shared/{share_token}/stream")
+async def shared_stream(share_token: str, request: Request, pwd: str = ""):
+    share = await db.get_share(share_token)
+    if not share:
+        raise HTTPException(status_code=404, detail="Invalid or expired link")
+    password_hash = share.get("password_hash", "")
+    if password_hash:
+        if hashlib.sha256(pwd.encode()).hexdigest() != password_hash:
+            raise HTTPException(status_code=401, detail="Wrong password")
     return await _stream_file(share["file_id"], request)
+
+@app.delete("/api/files/{file_id}")
+async def delete_file(file_id: int, _: bool = Depends(verify_token)):
+    db._index["files"] = [f for f in db._index["files"] if f.get("id") != file_id]
+    await db.save_index(pyro_client)
+    return {"deleted": file_id}
+
+@app.patch("/api/files/{file_id}")
+async def update_file(file_id: int, body: dict, _: bool = Depends(verify_token)):
+    for f in db._index["files"]:
+        if f.get("id") == file_id:
+            if "filename" in body:
+                f["filename"] = body["filename"].strip() or f["filename"]
+            if "caption" in body:
+                f["caption"] = body["caption"]
+            await db.save_index(pyro_client)
+            return f
+    raise HTTPException(status_code=404, detail="File not found")
 
 # ── Streaming logic ───────────────────────────────────────────────────────────
 

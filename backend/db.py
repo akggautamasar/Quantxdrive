@@ -191,9 +191,9 @@ async def move_file_to_folder(file_id: int, folder_id):
 
 # ── Shares ────────────────────────────────────────────────────────────────────
 
-async def add_share(token: str, file_id: int, expires_at: int):
+async def add_share(token: str, file_id: int, expires_at: int, password_hash: str = ""):
     _index.setdefault("shares", {})[token] = {
-        "file_id": file_id, "expires_at": expires_at,
+        "file_id": file_id, "expires_at": expires_at, "password_hash": password_hash,
     }
 
 async def get_share(token: str):
