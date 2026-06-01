@@ -20,4 +20,4 @@ services:
       - key: BOT_TOKEN
         value: PASTE_YOUR_BOT_TOKEN_HERE
       - key: INDEX_CHANNEL_ID
-        value: "-1003897388411"
+        value: "me"

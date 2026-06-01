@@ -1,7 +1,8 @@
 import json, os, io, time, uuid
 from typing import Optional
 
-INDEX_CHANNEL_ID = int(os.getenv("INDEX_CHANNEL_ID", "-1003897388411"))
+_raw_idx = os.getenv("INDEX_CHANNEL_ID", "me")
+INDEX_CHANNEL_ID = int(_raw_idx) if _raw_idx.lstrip("-").isdigit() else _raw_idx
 
 _index: dict = {"files": [], "next_id": 1, "folders": [], "shares": {}}
 _index_msg_id: Optional[int] = None
@@ -12,28 +13,45 @@ def _ensure_keys():
     _index.setdefault("folders", [])
     _index.setdefault("shares", {})
 
-async def load_index(client):
+async def _load_index_from(client, chat_id):
+    """Try to load index.json from the given chat_id. Returns True on success."""
     global _index, _index_msg_id
-    try:
-        chat = await client.get_chat(INDEX_CHANNEL_ID)
-        print(f"✅ Index channel: {chat.title}")
-        latest_msg = None
-        async for msg in client.get_chat_history(INDEX_CHANNEL_ID, limit=50):
-            if msg.document and msg.document.file_name == "index.json":
-                latest_msg = msg
-                break
-        if latest_msg:
-            _index_msg_id = latest_msg.id
-            file_bytes = await client.download_media(latest_msg, in_memory=True)
-            data = bytes(file_bytes.getbuffer())
-            _index = json.loads(data.decode("utf-8"))
-            print(f"✅ Loaded index msg {_index_msg_id}: {len(_index.get('files',[]))} files")
-        else:
-            print("⚠️  No index.json found, starting fresh")
-            _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
-    except Exception as e:
-        print(f"⚠️  Could not load index: {e}")
+    chat = await client.get_chat(chat_id)
+    label = getattr(chat, "title", None) or getattr(chat, "first_name", str(chat_id))
+    print(f"✅ Index channel: {label}")
+    latest_msg = None
+    async for msg in client.get_chat_history(chat_id, limit=50):
+        if msg.document and msg.document.file_name == "index.json":
+            latest_msg = msg
+            break
+    if latest_msg:
+        _index_msg_id = latest_msg.id
+        file_bytes = await client.download_media(latest_msg, in_memory=True)
+        data = bytes(file_bytes.getbuffer())
+        _index = json.loads(data.decode("utf-8"))
+        print(f"✅ Loaded index msg {_index_msg_id}: {len(_index.get('files',[]))} files")
+    else:
+        print("⚠️  No index.json found, starting fresh")
         _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+    return True
+
+async def load_index(client):
+    global _index, _index_msg_id, INDEX_CHANNEL_ID
+    # Try configured channel first; if it fails, fall back to "me" (Saved Messages)
+    try:
+        await _load_index_from(client, INDEX_CHANNEL_ID)
+    except Exception as e:
+        print(f"⚠️  Could not load index from {INDEX_CHANNEL_ID!r}: {e}")
+        if INDEX_CHANNEL_ID != "me":
+            print("↩️  Falling back to Saved Messages (me)")
+            try:
+                INDEX_CHANNEL_ID = "me"
+                await _load_index_from(client, "me")
+            except Exception as e2:
+                print(f"❌ Fallback also failed: {e2}")
+                _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+        else:
+            _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
     _ensure_keys()
 
 def cleanup_expired_shares():
