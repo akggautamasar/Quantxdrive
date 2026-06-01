@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pyrogram import Client
-import os, math, jwt, mimetypes, asyncio, secrets, time
+import os, math, jwt, mimetypes, asyncio, secrets, time, httpx
 from datetime import datetime, timedelta
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
@@ -18,6 +18,7 @@ API_HASH       = os.getenv("API_HASH", "e98cc55fabed0fce53269188fa3a0e63")
 JWT_SECRET     = os.getenv("JWT_SECRET", "airdrive_secret_change_this")
 APP_PASSWORD   = os.getenv("APP_PASSWORD", "Airlocked@6279")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
+BOT_TOKEN      = os.getenv("BOT_TOKEN", "")  # Optional: Telegram bot in your channels → enables CDN redirect
 
 CHANNELS = {
     "call_recordings": -1004274179262,
@@ -44,26 +45,62 @@ def get_mime(filename):
     return MIME_MAP.get(ext) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 pyro_client: Optional[Client] = None
+_http_client: Optional[httpx.AsyncClient] = None
 _sync_lock = asyncio.Lock()
 _upsert_lock = asyncio.Lock()
 
+# TTL cache for Bot API file URLs (valid ~1 hour)
+_bot_url_cache: dict = {}  # file_id -> (url, timestamp)
+_BOT_URL_TTL = 3300  # 55 minutes to be safe
+
+def make_tg_link(channel_id: int, message_id: int) -> str:
+    """Build a t.me/c/ deep link so the user can open any file directly in Telegram."""
+    ch = str(channel_id)
+    if ch.startswith("-100"):
+        ch = ch[4:]
+    elif ch.startswith("-"):
+        ch = ch[1:]
+    return f"https://t.me/c/{ch}/{message_id}"
+
+async def get_bot_file_url(file_id: str) -> Optional[str]:
+    """Return a Telegram CDN URL for this file via Bot API (files ≤ 20 MB only).
+    Caches results for ~55 min so repeated thumbnail loads don't hit the Bot API."""
+    if not BOT_TOKEN or not _http_client:
+        return None
+    cached = _bot_url_cache.get(file_id)
+    if cached and (time.time() - cached[1]) < _BOT_URL_TTL:
+        return cached[0]
+    # Evict oldest entries when cache grows large
+    if len(_bot_url_cache) > 500:
+        oldest = sorted(_bot_url_cache.items(), key=lambda x: x[1][1])[:100]
+        for k, _ in oldest:
+            del _bot_url_cache[k]
+    try:
+        r = await _http_client.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+        )
+        data = r.json()
+        if data.get("ok") and data.get("result", {}).get("file_path"):
+            url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
+            _bot_url_cache[file_id] = (url, time.time())
+            return url
+    except Exception:
+        pass
+    return None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pyro_client
+    global pyro_client, _http_client
     print("🚀 Starting AirDrive...")
+    _http_client = httpx.AsyncClient(timeout=15.0)
     pyro_client = Client(name="airdrive_render", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
     await pyro_client.start()
     print("✅ Pyrogram started")
-    try:
-        count = 0
-        async for _ in pyro_client.get_dialogs():
-            count += 1
-        print(f"✅ Loaded {count} dialogs")
-    except Exception as e:
-        print(f"⚠️  {e}")
     await db.load_index(pyro_client)
     yield
     await pyro_client.stop()
+    await _http_client.aclose()
 
 app = FastAPI(title="AirDrive API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
@@ -156,7 +193,12 @@ async def list_files(
         category=category, q=q, folder=folder, favorites=favorites,
         sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset
     )
-    return {"files": files, "total": total, "page": page, "pages": -(-total // limit)}
+    # Add computed tg_link without mutating in-memory index
+    files_out = [
+        {**f, "tg_link": make_tg_link(f.get("channel_id", 0), f.get("message_id", 0))}
+        for f in files
+    ]
+    return {"files": files_out, "total": total, "page": page, "pages": -(-total // limit)}
 
 @app.get("/api/stats")
 async def stats(_: bool = Depends(verify_token)):
@@ -242,8 +284,24 @@ async def _stream_file(file_db_id: int, request: Request):
     file_size = file.get("size", 0)
     mime_type = file.get("mime") or get_mime(file["filename"])
     range_header = request.headers.get("range") or request.headers.get("Range")
+    disposition = "inline" if any(x in mime_type for x in ["video/", "audio/", "image/", "pdf", "epub", "/html"]) else "attachment"
 
-    start, end = 0, max(0, file_size - 1)
+    # No known size: stream the whole file without range support
+    if not file_size:
+        async def simple_gen():
+            try:
+                async for chunk in pyro_client.stream_media(file["file_id"]):
+                    if chunk:
+                        yield chunk
+            except Exception as e:
+                print(f"Stream err: {e}")
+        return StreamingResponse(simple_gen(), status_code=200, media_type=mime_type, headers={
+            "Content-Type": mime_type,
+            "Content-Disposition": f'{disposition}; filename="{quote(file["filename"])}"',
+            "Cache-Control": "public, max-age=3600",
+        })
+
+    start, end = 0, file_size - 1
     if range_header and range_header.startswith("bytes="):
         try:
             rs = range_header[6:]
@@ -256,16 +314,14 @@ async def _stream_file(file_db_id: int, request: Request):
                 start = int(parts[0])
                 if parts[1]: end = int(parts[1])
         except: pass
-
-    start = max(0, min(start, file_size - 1))
-    end = max(start, min(end, file_size - 1))
+        start = max(0, min(start, file_size - 1))
+        end = max(start, min(end, file_size - 1))
 
     chunk_size = 1024 * 1024
     offset = start - (start % chunk_size)
     first_cut = start - offset
     last_cut = (end % chunk_size) + 1
     part_count = math.ceil((end + 1) / chunk_size) - math.floor(offset / chunk_size)
-    content_length = end - start + 1
 
     async def generator():
         chunk_offset = offset // chunk_size
@@ -287,11 +343,15 @@ async def _stream_file(file_db_id: int, request: Request):
 
     is_range = bool(range_header)
     status = 206 if is_range else 200
-    disposition = "inline" if any(x in mime_type for x in ["video/", "audio/", "image/", "pdf", "epub", "/html"]) else "attachment"
 
+    # NOTE: We intentionally omit Content-Length.
+    # Pyrogram's chunk boundaries don't align perfectly with our 1 MB math,
+    # so pre-declaring a byte count causes uvicorn to raise
+    # "Response content shorter than Content-Length" when the last chunk is
+    # trimmed. Without Content-Length, uvicorn streams until the generator
+    # is exhausted with no error. Video seeking still works via Content-Range.
     headers = {
         "Content-Type": mime_type,
-        "Content-Length": str(content_length),
         "Accept-Ranges": "bytes",
         "Content-Disposition": f'{disposition}; filename="{quote(file["filename"])}"',
         "Cache-Control": "public, max-age=3600",
@@ -305,4 +365,35 @@ async def _stream_file(file_db_id: int, request: Request):
 async def media_stream(token: str, file_db_id: int, request: Request):
     if not verify_jwt(token):
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    file = await db.get_file_by_id(file_db_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # For small files (≤ 20 MB) without a Range header, redirect the browser to
+    # Telegram's CDN directly — zero bandwidth through Render.
+    range_header = request.headers.get("range")
+    if BOT_TOKEN and not range_header and file.get("size", 0) <= 20 * 1024 * 1024:
+        cdn_url = await get_bot_file_url(file["file_id"])
+        if cdn_url:
+            return RedirectResponse(cdn_url, status_code=302)
+
     return await _stream_file(file_db_id, request)
+
+
+@app.get("/api/files/{file_db_id}/link")
+async def get_file_link(file_db_id: int, _: bool = Depends(verify_token)):
+    """Return the best available direct link for a file.
+    Returns a Telegram CDN URL for files ≤ 20 MB (if BOT_TOKEN set),
+    otherwise a t.me deep link that opens the file in the Telegram app."""
+    file = await db.get_file_by_id(file_db_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if file.get("size", 0) <= 20 * 1024 * 1024:
+        cdn_url = await get_bot_file_url(file["file_id"])
+        if cdn_url:
+            return {"type": "cdn", "url": cdn_url, "filename": file["filename"]}
+
+    tg_url = make_tg_link(file["channel_id"], file["message_id"])
+    return {"type": "telegram", "url": tg_url, "filename": file["filename"]}
