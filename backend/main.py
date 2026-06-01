@@ -284,8 +284,24 @@ async def _stream_file(file_db_id: int, request: Request):
     file_size = file.get("size", 0)
     mime_type = file.get("mime") or get_mime(file["filename"])
     range_header = request.headers.get("range") or request.headers.get("Range")
+    disposition = "inline" if any(x in mime_type for x in ["video/", "audio/", "image/", "pdf", "epub", "/html"]) else "attachment"
 
-    start, end = 0, max(0, file_size - 1)
+    # No known size: stream the whole file without range support
+    if not file_size:
+        async def simple_gen():
+            try:
+                async for chunk in pyro_client.stream_media(file["file_id"]):
+                    if chunk:
+                        yield chunk
+            except Exception as e:
+                print(f"Stream err: {e}")
+        return StreamingResponse(simple_gen(), status_code=200, media_type=mime_type, headers={
+            "Content-Type": mime_type,
+            "Content-Disposition": f'{disposition}; filename="{quote(file["filename"])}"',
+            "Cache-Control": "public, max-age=3600",
+        })
+
+    start, end = 0, file_size - 1
     if range_header and range_header.startswith("bytes="):
         try:
             rs = range_header[6:]
@@ -298,16 +314,14 @@ async def _stream_file(file_db_id: int, request: Request):
                 start = int(parts[0])
                 if parts[1]: end = int(parts[1])
         except: pass
-
-    start = max(0, min(start, file_size - 1))
-    end = max(start, min(end, file_size - 1))
+        start = max(0, min(start, file_size - 1))
+        end = max(start, min(end, file_size - 1))
 
     chunk_size = 1024 * 1024
     offset = start - (start % chunk_size)
     first_cut = start - offset
     last_cut = (end % chunk_size) + 1
     part_count = math.ceil((end + 1) / chunk_size) - math.floor(offset / chunk_size)
-    content_length = end - start + 1
 
     async def generator():
         chunk_offset = offset // chunk_size
@@ -329,11 +343,15 @@ async def _stream_file(file_db_id: int, request: Request):
 
     is_range = bool(range_header)
     status = 206 if is_range else 200
-    disposition = "inline" if any(x in mime_type for x in ["video/", "audio/", "image/", "pdf", "epub", "/html"]) else "attachment"
 
+    # NOTE: We intentionally omit Content-Length.
+    # Pyrogram's chunk boundaries don't align perfectly with our 1 MB math,
+    # so pre-declaring a byte count causes uvicorn to raise
+    # "Response content shorter than Content-Length" when the last chunk is
+    # trimmed. Without Content-Length, uvicorn streams until the generator
+    # is exhausted with no error. Video seeking still works via Content-Range.
     headers = {
         "Content-Type": mime_type,
-        "Content-Length": str(content_length),
         "Accept-Ranges": "bytes",
         "Content-Disposition": f'{disposition}; filename="{quote(file["filename"])}"',
         "Cache-Control": "public, max-age=3600",
