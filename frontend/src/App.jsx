@@ -16,15 +16,15 @@ const CATEGORIES = [
 ];
 
 const COLORS = {
-  photos: { bg: "#ede9ff", text: "#6c63ff" },
-  videos: { bg: "#fff0f3", text: "#ff4d6d" },
-  audio:  { bg: "#e6fdf6", text: "#00b894" },
-  pdfs:   { bg: "#fff4e6", text: "#e67e22" },
-  word_excel: { bg: "#e6faf4", text: "#00a878" },
-  call_recordings: { bg: "#fdf0f8", text: "#d63384" },
-  other_files: { bg: "#f0eeff", text: "#7c6fcd" },
+  photos:          { bg: "#ede9ff", text: "#6c63ff", glow: "rgba(108,99,255,0.2)" },
+  videos:          { bg: "#fff0f3", text: "#ff4d6d", glow: "rgba(255,77,109,0.2)" },
+  audio:           { bg: "#e6fdf6", text: "#00b894", glow: "rgba(0,184,148,0.2)" },
+  pdfs:            { bg: "#fff4e6", text: "#e67e22", glow: "rgba(230,126,34,0.2)" },
+  word_excel:      { bg: "#e6faf4", text: "#00a878", glow: "rgba(0,168,120,0.2)" },
+  call_recordings: { bg: "#fdf0f8", text: "#d63384", glow: "rgba(214,51,132,0.2)" },
+  other_files:     { bg: "#f0eeff", text: "#7c6fcd", glow: "rgba(124,111,205,0.2)" },
 };
-const getColor = c => COLORS[c] || { bg: "#f0f2f8", text: "#6c63ff" };
+const getColor = c => COLORS[c] || { bg: "#f0eeff", text: "#6c63ff", glow: "rgba(108,99,255,0.2)" };
 
 const getKind = file => {
   const m = file.mime || ""; const n = (file.filename || "").toLowerCase();
@@ -37,9 +37,11 @@ const getKind = file => {
   if (m.startsWith("text/") || /\.(txt|md|log|json|csv|xml|html|js|py|css)$/.test(n)) return "text";
   return "other";
 };
-const getEmoji = k => ({ image:"🖼️", video:"🎬", audio:"🎵", pdf:"📄", epub:"📚", office:"📊", text:"📝", other:"📦"}[k]);
+const getEmoji = k => ({ image:"🖼️", video:"🎬", audio:"🎵", pdf:"📄", epub:"📚", office:"📊", text:"📝", other:"📦" }[k] || "📦");
 const fmtSize = b => !b ? "—" : b < 1024*1024 ? `${(b/1024).toFixed(0)} KB` : b < 1024*1024*1024 ? `${(b/(1024*1024)).toFixed(1)} MB` : `${(b/(1024*1024*1024)).toFixed(2)} GB`;
 const fmtDate = d => d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" }) : "";
+const fmtTime = t => { if (!t || !isFinite(t)) return "0:00"; const m = Math.floor(t/60); const s = Math.floor(t%60); return `${m}:${s.toString().padStart(2,"0")}`; };
+const stripExt = name => name.replace(/\.[^/.]+$/, "");
 
 // ── Login ─────────────────────────────────────────────────────────────────────
 function Login({ onLogin }) {
@@ -47,152 +49,362 @@ function Login({ onLogin }) {
   const [slowWakeup, setSlowWakeup] = useState(false);
   const submit = async () => {
     setLoading(true); setErr(""); setSlowWakeup(false);
-    // Show a friendly message if the backend takes > 5 s (Render cold start)
     const wakeTimer = setTimeout(() => setSlowWakeup(true), 5000);
     try {
-      const res = await fetch(`${API}/api/login`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({password: pw}) });
+      const res = await fetch(`${API}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
       clearTimeout(wakeTimer); setSlowWakeup(false);
       if (!res.ok) throw new Error();
       const { token } = await res.json();
       localStorage.setItem("ad_token", token); onLogin(token);
-    } catch {
-      clearTimeout(wakeTimer); setSlowWakeup(false);
-      setErr("Wrong password");
-    }
+    } catch { clearTimeout(wakeTimer); setSlowWakeup(false); setErr("Wrong password"); }
     setLoading(false);
   };
   return (
-    <div style={S.loginWrap}>
-      <div style={S.loginCard}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <div style={S.logoMark}>✦</div><span style={{ fontWeight: 900, fontSize: 26 }}>AirDrive</span>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "radial-gradient(ellipse 80% 60% at 20% 80%, #ede9ff 0%, transparent 55%), radial-gradient(ellipse 50% 40% at 80% 20%, #ffeef3 0%, transparent 50%), #f0f2f8", overflow: "hidden", position: "relative" }}>
+      {/* decorative orbs */}
+      <div style={{ position: "absolute", top: "10%", left: "5%", width: 320, height: 320, borderRadius: "50%", background: "radial-gradient(circle, rgba(108,99,255,0.12), transparent)", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", bottom: "15%", right: "8%", width: 240, height: 240, borderRadius: "50%", background: "radial-gradient(circle, rgba(255,101,132,0.1), transparent)", pointerEvents: "none" }} />
+      <div style={{ width: "min(400px, 92vw)", padding: "48px 40px", background: "rgba(255,255,255,0.9)", borderRadius: 24, boxShadow: "0 20px 60px rgba(108,99,255,0.18), 0 2px 8px rgba(0,0,0,0.06)", backdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.8)", display: "flex", flexDirection: "column", gap: 20, animation: "fadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#6c63ff,#ff6584)", borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, color: "white", boxShadow: "0 6px 20px rgba(108,99,255,0.4)" }}>✦</div>
+          <div>
+            <p style={{ fontWeight: 900, fontSize: 22, color: "#1a1a2e" }}>AirDrive</p>
+            <p style={{ fontSize: 11, color: "#8b8fa8", fontWeight: 600 }}>Telegram-powered cloud</p>
+          </div>
         </div>
-        <p style={{ color:"#8b8fa8", fontSize:13 }}>Your personal cloud on Telegram.</p>
-        <div style={{ display:"flex", gap:10 }}>
-          <input type="password" placeholder="Password" value={pw} onChange={e=>setPw(e.target.value)}
-            onKeyDown={e=>e.key==="Enter" && submit()} style={S.input} autoFocus />
-          <button style={S.btnP} onClick={submit} disabled={loading}>{loading?"…":"Unlock"}</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <input type="password" placeholder="Enter password…" value={pw} onChange={e => setPw(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && submit()}
+            style={{ background: "#f5f6fa", border: "2px solid #e4e7f0", borderRadius: 12, padding: "13px 16px", fontSize: 14, fontWeight: 600, color: "#1a1a2e", outline: "none", transition: "border 0.2s" }}
+            onFocus={e => e.target.style.borderColor = "#6c63ff"}
+            onBlur={e => e.target.style.borderColor = "#e4e7f0"}
+            autoFocus />
+          <button style={{ background: "linear-gradient(135deg,#6c63ff,#8b83ff)", color: "white", border: "none", borderRadius: 12, padding: "13px", fontWeight: 800, fontSize: 14, cursor: "pointer", boxShadow: "0 6px 20px rgba(108,99,255,0.35)", transition: "transform 0.1s, box-shadow 0.1s", opacity: loading ? 0.8 : 1 }}
+            onClick={submit} disabled={loading}
+            onMouseDown={e => e.currentTarget.style.transform = "scale(0.98)"}
+            onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+          >{loading ? "Unlocking…" : "🔓 Unlock"}</button>
         </div>
-        {slowWakeup && <div style={{ color:"#e67e22", fontSize:12, fontWeight:700, background:"#fff8f0", padding:"8px 12px", borderRadius:8 }}>
-          Waking up backend… this takes ~30 s on first load.
-        </div>}
-        {err && <div style={S.errBox}>{err}</div>}
+        {slowWakeup && <div style={{ color: "#e67e22", fontSize: 12, fontWeight: 700, background: "#fff8f0", padding: "10px 14px", borderRadius: 10, border: "1px solid #fde8c8" }}>⏳ Waking up backend… takes ~30 s on first load.</div>}
+        {err && <div style={{ color: "#d63384", fontSize: 12, fontWeight: 700, background: "#fff0f6", padding: "10px 14px", borderRadius: 10, border: "1px solid #ffd6e7" }}>❌ {err}</div>}
       </div>
+    </div>
+  );
+}
+
+// ── Equalizer bars (CSS animation, shown on playing audio card) ───────────────
+function EqBars({ playing }) {
+  const barStyle = (delay, animName) => ({
+    width: 3, borderRadius: 2,
+    background: "linear-gradient(180deg, #6c63ff, #00b894)",
+    animationName: playing ? animName : "none",
+    animationDuration: "0.8s",
+    animationTimingFunction: "ease-in-out",
+    animationIterationCount: "infinite",
+    animationDelay: delay,
+    height: playing ? undefined : 4,
+  });
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 18 }}>
+      <div style={barStyle("0s", "eq1")} />
+      <div style={barStyle("0.15s", "eq2")} />
+      <div style={barStyle("0.3s", "eq3")} />
+      <div style={barStyle("0.45s", "eq1")} />
     </div>
   );
 }
 
 // ── File Card ─────────────────────────────────────────────────────────────────
-function Card({ file, token, onPreview, onFav, onMenu }) {
+function Card({ file, token, onPreview, onFav, onMenu, nowPlayingId }) {
   const kind = getKind(file); const col = getColor(file.category);
   const url = `${API}/api/media/${token}/${file.id}`;
-  // Large files (> 20 MB) can't be redirected to Telegram CDN, so the download
-  // button for them opens the file via tg_link to save Render bandwidth.
+  const isPlaying = nowPlayingId === file.id;
   const isLarge = file.size > 20 * 1024 * 1024;
-  const dlHref = isLarge && file.tg_link ? file.tg_link : url;
   const dlProps = isLarge && file.tg_link
-    ? { href: dlHref, target: "_blank", rel: "noopener noreferrer" }
-    : { href: dlHref, download: file.filename };
+    ? { href: file.tg_link, target: "_blank", rel: "noopener noreferrer" }
+    : { href: url, download: file.filename };
+
   return (
-    <div style={{ ...S.card, borderColor: file.favorite ? "#ffc107" : "#e4e7f0" }} onClick={()=>onPreview(file)}>
-      <div style={{ ...S.thumb, background: col.bg }}>
+    <div className="card-hover" style={{ ...S.card, borderColor: isPlaying ? "#6c63ff" : file.favorite ? "#ffc107" : "#e8eaf2", boxShadow: isPlaying ? "0 0 0 2px rgba(108,99,255,0.3), 0 4px 16px rgba(108,99,255,0.15)" : undefined }} onClick={() => onPreview(file)}>
+      <div style={{ ...S.thumb, background: kind === "image" ? "#000" : col.bg }}>
         {kind === "image"
-          ? <img src={url} alt="" loading="lazy" style={{ width:"100%", height:"100%", objectFit:"cover" }} onError={e=>{ e.target.style.display="none"; }} />
-          : <span style={{ fontSize: 36 }}>{getEmoji(kind)}</span>}
-        <button onClick={e=>{ e.stopPropagation(); onFav(file); }} style={{ ...S.starBtn, color: file.favorite ? "#ffc107" : "#fff", textShadow: file.favorite ? "none" : "0 1px 3px rgba(0,0,0,0.4)" }}>
+          ? <img src={url} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { e.target.style.display = "none"; e.target.parentNode.style.background = col.bg; }} />
+          : kind === "audio"
+            ? <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 50, height: 50, borderRadius: "50%", background: `linear-gradient(135deg, ${col.text}, #6c63ff)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, animation: isPlaying ? "spin-disc 4s linear infinite" : "none", boxShadow: isPlaying ? `0 0 16px ${col.glow}` : "none" }}>🎵</div>
+                {isPlaying && <EqBars playing={true} />}
+              </div>
+            : <span style={{ fontSize: 38 }}>{getEmoji(kind)}</span>
+        }
+        <button onClick={e => { e.stopPropagation(); onFav(file); }} style={{ position: "absolute", top: 6, left: 6, background: file.favorite ? "rgba(255,193,7,0.2)" : "rgba(0,0,0,0.35)", border: "none", borderRadius: 6, fontSize: 14, cursor: "pointer", lineHeight: 1, padding: "3px 5px", backdropFilter: "blur(4px)", color: file.favorite ? "#ffc107" : "rgba(255,255,255,0.8)" }}>
           {file.favorite ? "★" : "☆"}
         </button>
+        {isPlaying && <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 3, background: "linear-gradient(90deg,#6c63ff,#ff6584,#00b894)", backgroundSize: "200% 100%", animation: "gradShift 2s linear infinite" }} />}
       </div>
-      <div style={{ padding:"8px 10px 4px" }}>
+      <div style={{ padding: "8px 10px 4px" }}>
         <p style={S.fname} title={file.filename}>{file.filename}</p>
-        <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"#8b8fa8", fontWeight:600 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#8b8fa8", fontWeight: 600 }}>
           <span>{fmtSize(file.size)}</span><span>{fmtDate(file.date)}</span>
         </div>
       </div>
-      <div style={{ padding:"4px 8px 8px", display:"flex", gap:6, justifyContent:"flex-end" }}>
-        <button onClick={e=>{ e.stopPropagation(); onMenu(file); }} style={{ ...S.smallBtn, background:"#f0f2f8", color:"#6b6b72" }}>⋯</button>
+      <div style={{ padding: "4px 8px 8px", display: "flex", gap: 5, justifyContent: "flex-end" }}>
+        <button onClick={e => { e.stopPropagation(); onMenu(file); }} style={{ ...S.smallBtn, background: "#f0f2f8", color: "#6b6b72" }}>⋯</button>
         {file.tg_link && (
-          <a href={file.tg_link} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}
-            title="Open in Telegram"
-            style={{ ...S.smallBtn, background:"#e8f4fd", color:"#229ED9", textDecoration:"none" }}>✈</a>
+          <a href={file.tg_link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+            title="Open in Telegram" style={{ ...S.smallBtn, background: "#e8f4fd", color: "#229ED9", textDecoration: "none" }}>✈</a>
         )}
-        <a {...dlProps} onClick={e=>e.stopPropagation()} style={{ ...S.smallBtn, background:col.bg, color:col.text, textDecoration:"none" }}>↓</a>
+        <a {...dlProps} onClick={e => e.stopPropagation()} style={{ ...S.smallBtn, background: col.bg, color: col.text, textDecoration: "none" }}>↓</a>
       </div>
     </div>
   );
 }
 
-// ── Action menu (folder, share) ───────────────────────────────────────────────
-function ActionMenu({ file, token, folders, onClose, onFolderChange, onShareCreated }) {
+// ── Audio Player ──────────────────────────────────────────────────────────────
+function AudioPlayer({ nowPlaying, setNowPlaying, token }) {
+  const audioRef = useRef(null);
+  const progressRef = useRef(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(() => parseFloat(localStorage.getItem("vol") || "0.9"));
+  const [shuffle, setShuffle] = useState(false);
+  const [repeat, setRepeat] = useState("none"); // "none"|"all"|"one"
+  const [isLoading, setIsLoading] = useState(false);
+
+  const track = nowPlaying?.file;
+  const queue = nowPlaying?.queue || [];
+  const qIdx = nowPlaying?.index ?? -1;
+
+  const goNext = useCallback(() => {
+    if (!queue.length) return;
+    let next;
+    if (shuffle) next = Math.floor(Math.random() * queue.length);
+    else if (qIdx < queue.length - 1) next = qIdx + 1;
+    else if (repeat === "all") next = 0;
+    else return;
+    setNowPlaying({ file: queue[next], queue, index: next });
+  }, [queue, qIdx, shuffle, repeat, setNowPlaying]);
+
+  const goPrev = useCallback(() => {
+    if (audioRef.current && currentTime > 3) { audioRef.current.currentTime = 0; return; }
+    if (qIdx > 0) setNowPlaying({ file: queue[qIdx - 1], queue, index: qIdx - 1 });
+  }, [currentTime, queue, qIdx, setNowPlaying]);
+
+  // Load new track
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!track || !audio) return;
+    setIsLoading(true);
+    setCurrentTime(0); setDuration(0);
+    audio.src = `${API}/api/media/${token}/${track.id}`;
+    audio.volume = volume;
+    audio.load();
+    audio.play().catch(() => {});
+  }, [track?.id, token]);
+
+  // Event listeners
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    const onTime = () => setCurrentTime(audio.currentTime);
+    const onDur = () => { setDuration(audio.duration || 0); setIsLoading(false); };
+    const onWait = () => setIsLoading(true);
+    const onCan = () => setIsLoading(false);
+    const onEnd = () => { if (repeat === "one") { audio.currentTime = 0; audio.play(); } else goNext(); };
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("pause", onPause);
+    audio.addEventListener("timeupdate", onTime);
+    audio.addEventListener("durationchange", onDur);
+    audio.addEventListener("waiting", onWait);
+    audio.addEventListener("canplay", onCan);
+    audio.addEventListener("ended", onEnd);
+    return () => {
+      audio.removeEventListener("play", onPlay); audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("timeupdate", onTime); audio.removeEventListener("durationchange", onDur);
+      audio.removeEventListener("waiting", onWait); audio.removeEventListener("canplay", onCan);
+      audio.removeEventListener("ended", onEnd);
+    };
+  }, [repeat, goNext]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    if (!track) return;
+    const onKey = e => {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+      const audio = audioRef.current;
+      if (!audio) return;
+      if (e.code === "Space") { e.preventDefault(); isPlaying ? audio.pause() : audio.play(); }
+      if (e.code === "ArrowRight" && !e.shiftKey) { e.preventDefault(); audio.currentTime = Math.min(duration, audio.currentTime + 10); }
+      if (e.code === "ArrowLeft" && !e.shiftKey) { e.preventDefault(); audio.currentTime = Math.max(0, audio.currentTime - 10); }
+      if (e.code === "ArrowRight" && e.shiftKey) goNext();
+      if (e.code === "ArrowLeft" && e.shiftKey) goPrev();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [track, isPlaying, duration, goNext, goPrev]);
+
+  const togglePlay = () => { const a = audioRef.current; if (!a) return; isPlaying ? a.pause() : a.play(); };
+
+  const handleSeek = e => {
+    const rect = progressRef.current?.getBoundingClientRect();
+    if (!rect || !duration || !audioRef.current) return;
+    audioRef.current.currentTime = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * duration;
+  };
+
+  const handleVol = e => {
+    const v = parseFloat(e.target.value);
+    setVolume(v);
+    if (audioRef.current) audioRef.current.volume = v;
+    localStorage.setItem("vol", v);
+  };
+
+  const nextRepeat = () => setRepeat(r => r === "none" ? "all" : r === "all" ? "one" : "none");
+  const progress = duration ? (currentTime / duration) * 100 : 0;
+
+  // Always render the audio element so it persists
+  if (!track) return <audio ref={audioRef} style={{ display: "none" }} />;
+
+  const trackName = stripExt(track.filename);
+
+  return (
+    <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 300, height: 76, background: "rgba(12,12,28,0.96)", backdropFilter: "blur(24px)", borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", gap: 0, boxShadow: "0 -4px 40px rgba(0,0,0,0.5)" }}>
+      <audio ref={audioRef} style={{ display: "none" }} />
+
+      {/* Progress bar strip at very top */}
+      <div ref={progressRef} onClick={handleSeek} style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, cursor: "pointer", background: "rgba(255,255,255,0.08)", zIndex: 1 }}>
+        <div style={{ height: "100%", width: `${progress}%`, background: "linear-gradient(90deg,#6c63ff,#ff6584)", transition: "width 0.15s", borderRadius: "0 2px 2px 0" }} />
+      </div>
+
+      {/* Left: disc + track info */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "0 20px", width: "clamp(180px, 25%, 280px)", flexShrink: 0 }}>
+        <div style={{ width: 44, height: 44, borderRadius: "50%", flexShrink: 0, background: "linear-gradient(135deg,#6c63ff,#ff6584)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, animation: isPlaying ? "spin-disc 5s linear infinite" : "none", boxShadow: isPlaying ? "0 0 18px rgba(108,99,255,0.6), 0 0 36px rgba(108,99,255,0.2)" : "0 2px 8px rgba(0,0,0,0.4)", transition: "box-shadow 0.4s", position: "relative" }}>
+          🎵
+          <div style={{ position: "absolute", inset: "20%", borderRadius: "50%", background: "rgba(12,12,28,0.6)" }} />
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <p style={{ color: "white", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 170, marginBottom: 2 }}>{trackName}</p>
+          <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 11 }}>{fmtSize(track.size)}</p>
+        </div>
+      </div>
+
+      {/* Center: controls */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "0 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Shuffle */}
+          <button onClick={() => setShuffle(s => !s)} title="Shuffle" style={{ ...S.pCtrl, color: shuffle ? "#6c63ff" : "rgba(255,255,255,0.35)", fontSize: 15 }}>⇄</button>
+
+          {/* Prev */}
+          <button onClick={goPrev} title="Previous (Shift+←)" style={{ ...S.pCtrl, fontSize: 18, color: "rgba(255,255,255,0.7)" }}>⏮</button>
+
+          {/* Play / Pause */}
+          <button onClick={togglePlay} title="Play/Pause (Space)" style={{ width: 44, height: 44, borderRadius: "50%", border: "none", cursor: "pointer", background: "linear-gradient(135deg,#6c63ff,#ff6584)", color: "white", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 20px rgba(108,99,255,0.6)", transition: "transform 0.1s, box-shadow 0.1s", flexShrink: 0 }}
+            onMouseDown={e => e.currentTarget.style.transform = "scale(0.92)"}
+            onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+          >
+            {isLoading ? <span style={{ animation: "spin 0.8s linear infinite", display: "inline-block" }}>⌛</span> : isPlaying ? "⏸" : "▶"}
+          </button>
+
+          {/* Next */}
+          <button onClick={goNext} title="Next (Shift+→)" style={{ ...S.pCtrl, fontSize: 18, color: "rgba(255,255,255,0.7)" }}>⏭</button>
+
+          {/* Repeat */}
+          <button onClick={nextRepeat} title="Repeat" style={{ ...S.pCtrl, color: repeat !== "none" ? "#6c63ff" : "rgba(255,255,255,0.35)", fontSize: 15, position: "relative" }}>
+            {repeat === "one" ? "↺" : "⟳"}
+            {repeat === "one" && <span style={{ position: "absolute", top: -3, right: -3, fontSize: 8, background: "#6c63ff", borderRadius: "50%", width: 10, height: 10, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontWeight: 900 }}>1</span>}
+          </button>
+        </div>
+
+        {/* Time */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 10, fontVariantNumeric: "tabular-nums", minWidth: 32 }}>{fmtTime(currentTime)}</span>
+          <EqBars playing={isPlaying} />
+          <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 10, fontVariantNumeric: "tabular-nums", minWidth: 32, textAlign: "right" }}>{fmtTime(duration)}</span>
+        </div>
+      </div>
+
+      {/* Right: volume + queue info + close */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 20px", width: "clamp(160px, 22%, 250px)", flexShrink: 0, justifyContent: "flex-end" }}>
+        <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 14 }}>{volume === 0 ? "🔇" : volume < 0.4 ? "🔉" : "🔊"}</span>
+        <input type="range" min="0" max="1" step="0.01" value={volume} onChange={handleVol} style={{ width: 72, accentColor: "#6c63ff" }} title="Volume (↑↓)" />
+        {queue.length > 1 && <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 10, fontWeight: 700 }}>{qIdx + 1}/{queue.length}</span>}
+        <button onClick={() => { audioRef.current?.pause(); setNowPlaying(null); }} title="Close player" style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "rgba(255,255,255,0.5)", width: 30, height: 30, cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.2s" }}
+          onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.15)"}
+          onMouseLeave={e => e.currentTarget.style.background = "rgba(255,255,255,0.08)"}
+        >✕</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Action menu ───────────────────────────────────────────────────────────────
+function ActionMenu({ file, token, folders, onClose, onFolderChange }) {
   const [tab, setTab] = useState("folder");
   const [creating, setCreating] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [shareLink, setShareLink] = useState(null);
-  const [shareExpiry, setShareExpiry] = useState("7"); // days
+  const [shareExpiry, setShareExpiry] = useState("7");
+  const [copied, setCopied] = useState(false);
 
-  const moveToFolder = async (folderId) => {
-    await fetch(`${API}/api/files/${file.id}/folder`, {
-      method: "POST", headers: {"Content-Type":"application/json", Authorization:`Bearer ${token}`},
-      body: JSON.stringify({ folder_id: folderId }),
-    });
+  const moveToFolder = async folderId => {
+    await fetch(`${API}/api/files/${file.id}/folder`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ folder_id: folderId }) });
     onFolderChange(); onClose();
   };
 
   const createFolder = async () => {
     if (!newFolderName.trim()) return;
     setCreating(true);
-    const res = await fetch(`${API}/api/folders`, {
-      method:"POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${token}`},
-      body: JSON.stringify({ name: newFolderName.trim() }),
-    });
-    const f = await res.json();
-    await moveToFolder(f.id);
+    const res = await fetch(`${API}/api/folders`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ name: newFolderName.trim() }) });
+    const f = await res.json(); await moveToFolder(f.id);
     setCreating(false); setNewFolderName("");
   };
 
   const createShareLink = async () => {
     const days = parseInt(shareExpiry) || 7;
-    const res = await fetch(`${API}/api/share/${file.id}`, {
-      method: "POST", headers:{"Content-Type":"application/json", Authorization:`Bearer ${token}`},
-      body: JSON.stringify({ expires_in: days * 86400 }),
-    });
+    const res = await fetch(`${API}/api/share/${file.id}`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ expires_in: days * 86400 }) });
     const data = await res.json();
-    const link = `${window.location.origin}/share/${data.share_token}`;
-    setShareLink(link);
-    onShareCreated && onShareCreated(link);
+    setShareLink(`${window.location.origin}/share/${data.share_token}`);
   };
+
+  const copy = () => { navigator.clipboard.writeText(shareLink); setCopied(true); setTimeout(() => setCopied(false), 2000); };
 
   return (
     <div style={S.overlay} onClick={onClose}>
-      <div style={{ ...S.modal, maxWidth: 480, maxHeight: "auto" }} onClick={e=>e.stopPropagation()}>
+      <div style={{ ...S.modal, maxWidth: 460 }} onClick={e => e.stopPropagation()}>
         <button style={S.modalClose} onClick={onClose}>✕</button>
-        <p style={S.modalTitle}>{file.filename}</p>
-        <div style={{ display:"flex", borderBottom:"1px solid #e4e7f0" }}>
-          <button onClick={()=>setTab("folder")} style={{ ...S.tab, ...(tab==="folder" ? S.tabActive : {}) }}>📁 Folder</button>
-          <button onClick={()=>setTab("share")} style={{ ...S.tab, ...(tab==="share" ? S.tabActive : {}) }}>🔗 Share</button>
+        <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid #e8eaf2" }}>
+          <p style={{ fontWeight: 800, fontSize: 13, color: "#1a1a2e", maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.filename}</p>
+          <p style={{ fontSize: 11, color: "#8b8fa8", marginTop: 2 }}>{fmtSize(file.size)} · {fmtDate(file.date)}</p>
+        </div>
+        <div style={{ display: "flex", borderBottom: "1px solid #e8eaf2" }}>
+          {[["folder","📁 Folder"],["share","🔗 Share"]].map(([k,l]) => (
+            <button key={k} onClick={() => setTab(k)} style={{ flex: 1, padding: "11px", background: "none", border: "none", fontSize: 13, fontWeight: 700, cursor: "pointer", color: tab === k ? "#6c63ff" : "#8b8fa8", borderBottom: tab === k ? "2px solid #6c63ff" : "2px solid transparent" }}>{l}</button>
+          ))}
         </div>
         {tab === "folder" && (
-          <div style={{ padding: 16, display:"flex", flexDirection:"column", gap:8 }}>
-            <button onClick={()=>moveToFolder(null)} style={{ ...S.listBtn, color: !file.folder_id ? "#6c63ff" : "#1a1a2e", fontWeight: !file.folder_id ? 800 : 600 }}>
-              📂 No folder {!file.folder_id && "✓"}
+          <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
+            <button onClick={() => moveToFolder(null)} style={{ ...S.listBtn, color: !file.folder_id ? "#6c63ff" : "#1a1a2e", fontWeight: !file.folder_id ? 800 : 600, borderColor: !file.folder_id ? "#c4beff" : "#e8eaf2" }}>
+              📂 No folder {!file.folder_id && <span style={{ marginLeft: "auto", color: "#6c63ff" }}>✓</span>}
             </button>
             {folders.map(f => (
-              <button key={f.id} onClick={()=>moveToFolder(f.id)} style={{ ...S.listBtn, color: file.folder_id===f.id ? "#6c63ff" : "#1a1a2e", fontWeight: file.folder_id===f.id ? 800 : 600 }}>
-                📁 {f.name} {file.folder_id===f.id && "✓"}
+              <button key={f.id} onClick={() => moveToFolder(f.id)} style={{ ...S.listBtn, color: file.folder_id === f.id ? "#6c63ff" : "#1a1a2e", fontWeight: file.folder_id === f.id ? 800 : 600, borderColor: file.folder_id === f.id ? "#c4beff" : "#e8eaf2" }}>
+                📁 {f.name} {file.folder_id === f.id && <span style={{ marginLeft: "auto", color: "#6c63ff" }}>✓</span>}
               </button>
             ))}
-            <div style={{ display:"flex", gap:8, marginTop:8 }}>
-              <input value={newFolderName} onChange={e=>setNewFolderName(e.target.value)} placeholder="New folder name..." style={{ ...S.input, flex:1, padding:"8px 12px" }} />
-              <button onClick={createFolder} disabled={creating || !newFolderName.trim()} style={{ ...S.btnP, padding:"8px 14px" }}>+ Create</button>
+            <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+              <input value={newFolderName} onChange={e => setNewFolderName(e.target.value)} placeholder="New folder name…" style={{ ...S.input, flex: 1, padding: "9px 12px", fontSize: 12 }}
+                onKeyDown={e => e.key === "Enter" && createFolder()} />
+              <button onClick={createFolder} disabled={creating || !newFolderName.trim()} style={{ ...S.btnP, padding: "9px 14px", fontSize: 12 }}>+ Add</button>
             </div>
           </div>
         )}
         {tab === "share" && (
-          <div style={{ padding: 16, display:"flex", flexDirection:"column", gap:12 }}>
+          <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
             {!shareLink ? (
               <>
-                <label style={{ fontSize:13, fontWeight:600, color:"#1a1a2e" }}>Link expires after</label>
-                <select value={shareExpiry} onChange={e=>setShareExpiry(e.target.value)} style={{ ...S.input, padding:"8px 12px" }}>
+                <label style={{ fontSize: 12, fontWeight: 700, color: "#6b6b72" }}>Link expires after</label>
+                <select value={shareExpiry} onChange={e => setShareExpiry(e.target.value)} style={{ ...S.input, padding: "9px 12px" }}>
                   <option value="1">1 day</option><option value="7">7 days</option>
                   <option value="30">30 days</option><option value="365">1 year</option>
                 </select>
@@ -200,9 +412,11 @@ function ActionMenu({ file, token, folders, onClose, onFolderChange, onShareCrea
               </>
             ) : (
               <>
-                <label style={{ fontSize:13, fontWeight:600 }}>Share link (anyone with this link can view):</label>
-                <input value={shareLink} readOnly style={{ ...S.input, padding:"8px 12px", fontSize:11 }} onClick={e=>e.target.select()} />
-                <button onClick={()=>{ navigator.clipboard.writeText(shareLink); alert("Copied!"); }} style={S.btnP}>📋 Copy Link</button>
+                <p style={{ fontSize: 12, fontWeight: 700, color: "#6b6b72" }}>Share link (anyone with this link can view)</p>
+                <input value={shareLink} readOnly style={{ ...S.input, padding: "9px 12px", fontSize: 11 }} onClick={e => e.target.select()} />
+                <button onClick={copy} style={{ ...S.btnP, background: copied ? "linear-gradient(135deg,#00b894,#00a878)" : undefined }}>
+                  {copied ? "✓ Copied!" : "📋 Copy Link"}
+                </button>
               </>
             )}
           </div>
@@ -219,46 +433,101 @@ function Preview({ file, token, onClose }) {
     const h = e => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, []);
+  }, [onClose]);
 
-  const render = () => {
-    if (kind === "image") return <img src={url} alt={file.filename} style={S.vImg} />;
-    if (kind === "video") return <video src={url} controls autoPlay playsInline style={S.vVid} />;
-    if (kind === "audio") return (
-      <div style={S.audioBox}>
-        <div style={{ fontSize: 80 }}>🎵</div>
-        <p style={{ fontWeight: 700, fontSize: 16, marginTop: 12, textAlign:"center" }}>{file.filename}</p>
-        <audio src={url} controls autoPlay style={{ width: "100%", marginTop: 20 }} />
-      </div>
-    );
-    if (kind === "pdf" || kind === "text") return <iframe src={url} style={S.vFrame} title={file.filename} />;
+  const inner = () => {
+    if (kind === "image") return <img src={url} alt={file.filename} style={{ maxWidth: "100%", maxHeight: "78vh", objectFit: "contain" }} />;
+    if (kind === "video") return <video src={url} controls autoPlay playsInline style={{ width: "100%", maxHeight: "78vh", background: "#000" }} />;
+    if (kind === "pdf" || kind === "text") return <iframe src={url} style={{ width: "100%", height: "78vh", border: "none", background: "white" }} title={file.filename} />;
     return (
-      <div style={S.unsupBox}>
-        <div style={{ fontSize: 60 }}>{getEmoji(kind)}</div>
-        <p style={{ fontWeight: 700, marginTop: 12 }}>{file.filename}</p>
-        <p style={{ fontSize: 13, color: "#8b8fa8", marginTop: 6 }}>Preview not supported</p>
-        <a href={url} download={file.filename} style={{ ...S.btnP, marginTop: 16, textDecoration: "none" }}>↓ Download</a>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 48, background: "white", width: "100%" }}>
+        <span style={{ fontSize: 64 }}>{getEmoji(kind)}</span>
+        <p style={{ fontWeight: 800, fontSize: 16, marginTop: 14, color: "#1a1a2e" }}>{file.filename}</p>
+        <p style={{ fontSize: 13, color: "#8b8fa8", marginTop: 6 }}>Preview not available</p>
+        <a href={url} download={file.filename} style={{ ...S.btnP, marginTop: 20, textDecoration: "none" }}>↓ Download</a>
       </div>
     );
   };
 
   return (
     <div style={S.overlay} onClick={onClose}>
-      <div style={S.modal} onClick={e=>e.stopPropagation()}>
+      <div style={S.modal} onClick={e => e.stopPropagation()}>
         <button style={S.modalClose} onClick={onClose}>✕</button>
         <p style={S.modalTitle}>{file.filename}</p>
-        <div style={S.vArea}>{render()}</div>
-        <div style={S.modalFooter}>
+        <div style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", background: kind === "image" || kind === "video" ? "#0d0d1a" : "white", minHeight: 250 }}>{inner()}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: "1px solid #e8eaf2", fontSize: 12, fontWeight: 600, color: "#8b8fa8", flexShrink: 0, flexWrap: "wrap" }}>
           <span>{fmtSize(file.size)}</span><span>{fmtDate(file.date)}</span>
-          {file.tg_link && (
-            <a href={file.tg_link} target="_blank" rel="noopener noreferrer"
-              style={{ ...S.btnP, padding:"7px 14px", textDecoration:"none", fontSize:13, background:"linear-gradient(135deg,#229ED9,#1a8bc4)", boxShadow:"0 4px 12px rgba(34,158,217,0.3)" }}>
-              ✈ Open in Telegram
-            </a>
-          )}
-          <a href={url} download={file.filename} style={{ ...S.btnP, marginLeft: file.tg_link ? 0 : "auto", padding:"7px 16px", textDecoration:"none", fontSize:13 }}>↓ Download</a>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            {file.tg_link && (
+              <a href={file.tg_link} target="_blank" rel="noopener noreferrer" style={{ ...S.btnP, padding: "7px 14px", textDecoration: "none", fontSize: 12, background: "linear-gradient(135deg,#229ED9,#1a8bc4)", boxShadow: "0 4px 12px rgba(34,158,217,0.3)" }}>✈ Telegram</a>
+            )}
+            <a href={url} download={file.filename} style={{ ...S.btnP, padding: "7px 14px", textDecoration: "none", fontSize: 12 }}>↓ Download</a>
+          </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function Sidebar({ category, setCategory, stats, syncing, onSync, onClose, isMobile, getCount, folders, folder, setFolder }) {
+  const totalSize = stats?.total_size || 0;
+  const maxSize = 10 * 1024 * 1024 * 1024; // 10 GB visual scale
+  const usagePct = Math.min(100, (totalSize / maxSize) * 100);
+
+  return (
+    <div style={{ ...S.sidebar, ...(isMobile ? S.mobileSb : {}) }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBottom: 16, borderBottom: "1px solid #e8eaf2", marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 36, height: 36, background: "linear-gradient(135deg,#6c63ff,#ff6584)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: "white", boxShadow: "0 4px 14px rgba(108,99,255,0.35)" }}>✦</div>
+          <div>
+            <span style={{ fontWeight: 900, fontSize: 17, color: "#1a1a2e" }}>AirDrive</span>
+            <p style={{ fontSize: 10, color: "#aab0c6", fontWeight: 600, lineHeight: 1 }}>Telegram Cloud</p>
+          </div>
+        </div>
+        {isMobile && <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#8b8fa8" }}>✕</button>}
+      </div>
+
+      <button style={{ width: "100%", padding: "9px 14px", background: syncing ? "#e8eaf2" : "linear-gradient(135deg,#6c63ff,#8b83ff)", border: "none", borderRadius: 10, color: syncing ? "#6b6b72" : "white", fontSize: 12, fontWeight: 800, cursor: syncing ? "not-allowed" : "pointer", boxShadow: syncing ? "none" : "0 4px 14px rgba(108,99,255,0.3)", transition: "all 0.2s", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+        onClick={onSync} disabled={syncing}>
+        <span style={{ display: "inline-block", animation: syncing ? "spin 1s linear infinite" : "none" }}>⟳</span>
+        {syncing ? "Syncing…" : "Sync Files"}
+      </button>
+
+      <nav style={{ display: "flex", flexDirection: "column", gap: 1, marginTop: 10, flex: 1, overflowY: "auto" }}>
+        {CATEGORIES.map(c => {
+          const active = category === c.key;
+          const col = (c.key && !c.key.startsWith("__")) ? getColor(c.key) : { bg: "#ede9ff", text: "#6c63ff" };
+          const count = getCount(c.key);
+          return (
+            <button key={c.key || "all"}
+              style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 12, width: "100%", background: active ? col.bg : "transparent", color: active ? col.text : "#6b6b72", fontWeight: active ? 800 : 600, transition: "all 0.15s", borderLeft: active ? `3px solid ${col.text}` : "3px solid transparent" }}
+              onMouseEnter={e => { if (!active) e.currentTarget.style.background = "#f5f6fa"; }}
+              onMouseLeave={e => { if (!active) e.currentTarget.style.background = "transparent"; }}
+              onClick={() => { setCategory(c.key); if (isMobile) onClose(); }}>
+              <span style={{ fontSize: 14, width: 20, textAlign: "center" }}>{c.emoji}</span>
+              <span style={{ flex: 1, textAlign: "left" }}>{c.label}</span>
+              {count != null && <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 20, background: active ? col.text : "#f0f2f8", color: active ? "white" : "#aab0c6" }}>{count.toLocaleString()}</span>}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Storage usage */}
+      {stats && (
+        <div style={{ borderTop: "1px solid #e8eaf2", paddingTop: 12, marginTop: 4 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <p style={{ fontSize: 18, fontWeight: 900, background: "linear-gradient(135deg,#6c63ff,#ff6584)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+              {stats.total_files?.toLocaleString()}
+            </p>
+            <p style={{ fontSize: 11, color: "#aab0c6", fontWeight: 600, alignSelf: "flex-end" }}>{fmtSize(totalSize)}</p>
+          </div>
+          <div style={{ height: 4, background: "#e8eaf2", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${usagePct}%`, background: "linear-gradient(90deg,#6c63ff,#ff6584)", borderRadius: 4, transition: "width 0.5s" }} />
+          </div>
+          <p style={{ fontSize: 10, color: "#aab0c6", marginTop: 4 }}>files · {usagePct.toFixed(1)}% of 10 GB</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -282,6 +551,8 @@ export default function App() {
   const [sbOpen, setSbOpen] = useState(false);
   const [sortBy, setSortBy] = useState("date");
   const [sortDir, setSortDir] = useState("desc");
+  const [viewMode, setViewMode] = useState("grid"); // "grid" | "list"
+  const [nowPlaying, setNowPlaying] = useState(null);
   const searchTimer = useRef(null);
 
   const showFavorites = category === "__favorites";
@@ -296,7 +567,7 @@ export default function App() {
       if (q) p.set("q", q);
       if (fav) p.set("favorites", "true");
       if (fld !== null) p.set("folder", fld);
-      const res = await fetch(`${API}/api/files?${p}`, { headers: {Authorization:`Bearer ${token}`} });
+      const res = await fetch(`${API}/api/files?${p}`, { headers: { Authorization: `Bearer ${token}` } });
       if (res.status === 401) { setToken(""); localStorage.removeItem("ad_token"); return; }
       const data = await res.json();
       setFiles(data.files); setTotal(data.total); setPages(data.pages);
@@ -305,18 +576,11 @@ export default function App() {
   }, [token]);
 
   const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/api/stats`, { headers: {Authorization:`Bearer ${token}`} });
-      setStats(await res.json());
-    } catch {}
+    try { const res = await fetch(`${API}/api/stats`, { headers: { Authorization: `Bearer ${token}` } }); setStats(await res.json()); } catch {}
   }, [token]);
 
   const fetchFolders = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/api/folders`, { headers: {Authorization:`Bearer ${token}`} });
-      const data = await res.json();
-      setFolders(data.folders || []);
-    } catch {}
+    try { const res = await fetch(`${API}/api/folders`, { headers: { Authorization: `Bearer ${token}` } }); const d = await res.json(); setFolders(d.folders || []); } catch {}
   }, [token]);
 
   useEffect(() => {
@@ -336,72 +600,100 @@ export default function App() {
   const syncAll = async () => {
     setSyncing(true);
     try {
-      await fetch(`${API}/api/sync/all`, { method: "POST", headers: {Authorization:`Bearer ${token}`} });
+      await fetch(`${API}/api/sync/all`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
       await Promise.all([fetchFiles(realCategory, query, page, sortBy, sortDir, showFavorites, showFolders ? folder : null), fetchStats()]);
     } catch {}
     setSyncing(false);
   };
 
-  const toggleFav = async (file) => {
-    await fetch(`${API}/api/favorite/${file.id}`, { method: "POST", headers: {Authorization:`Bearer ${token}`} });
+  const toggleFav = async file => {
+    await fetch(`${API}/api/favorite/${file.id}`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
     setFiles(files.map(f => f.id === file.id ? { ...f, favorite: !f.favorite } : f));
+  };
+
+  // When an audio file is clicked, load it into the player with the full audio queue
+  const handlePreview = file => {
+    if (getKind(file) === "audio") {
+      const audioFiles = files.filter(f => getKind(f) === "audio");
+      const idx = audioFiles.findIndex(f => f.id === file.id);
+      setNowPlaying({ file, queue: audioFiles, index: idx >= 0 ? idx : 0 });
+    } else {
+      setPreview(file);
+    }
   };
 
   if (!token) return <Login onLogin={setToken} />;
 
   const catStats = stats?.by_category?.reduce((a, r) => { a[r.category] = r; return a; }, {}) || {};
-
-  // Determine which sidebar items to show counts for
-  const getCount = (key) => {
+  const getCount = key => {
     if (key === null) return stats?.total_files;
     if (key === "__favorites") return stats?.favorites_count;
     if (key === "__folders") return stats?.folders_count;
     return catStats[key]?.count;
   };
 
+  const playerOpen = !!nowPlaying;
+
   return (
-    <div style={S.app}>
+    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "#f0f2f8" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Nunito', sans-serif; }
-        body { background: #f5f6fa; }
+        body { background: #f0f2f8; }
         ::-webkit-scrollbar { width: 5px; height: 5px; }
-        ::-webkit-scrollbar-thumb { background: #e4e7f0; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb { background: #d4d8eb; border-radius: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
         .desktop-sb { display: block; }
         .mobile-only { display: none; }
         .mobile-btn { display: none; }
-        @media (max-width: 768px) {
-          .desktop-sb { display: none; }
-          .mobile-only { display: block; }
-          .mobile-btn { display: flex; }
-        }
+        @media (max-width: 768px) { .desktop-sb { display: none; } .mobile-only { display: block; } .mobile-btn { display: flex; } }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes spin-disc { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes gradShift { 0%{background-position:0%} 100%{background-position:200%} }
+        @keyframes eq1 { 0%,100%{height:3px} 50%{height:14px} }
+        @keyframes eq2 { 0%,100%{height:9px} 30%{height:3px} 70%{height:13px} }
+        @keyframes eq3 { 0%,100%{height:5px} 40%{height:16px} 80%{height:6px} }
+        @keyframes eq4 { 0%,100%{height:7px} 60%{height:4px} }
+        .card-hover { transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; }
+        .card-hover:hover { transform: translateY(-3px); box-shadow: 0 10px 28px rgba(108,99,255,0.14) !important; }
+        .list-row:hover { background: rgba(108,99,255,0.04) !important; }
+        input[type="range"] { accent-color: #6c63ff; cursor: pointer; height: 4px; }
+        input[type="range"]:focus { outline: none; }
+        button:focus { outline: none; }
+        select { outline: none; }
       `}</style>
 
+      {/* Desktop Sidebar */}
       <div className="desktop-sb">
         <Sidebar category={category} setCategory={handleCategory} stats={stats} syncing={syncing} onSync={syncAll}
-          onClose={()=>{}} isMobile={false} getCount={getCount} folders={folders} folder={folder} setFolder={setFolder} />
+          onClose={() => {}} isMobile={false} getCount={getCount} folders={folders} folder={folder} setFolder={setFolder} />
       </div>
 
+      {/* Mobile Sidebar overlay */}
       {sbOpen && (
         <>
-          <div onClick={()=>setSbOpen(false)} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.4)", zIndex:99 }} />
+          <div onClick={() => setSbOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 99, backdropFilter: "blur(2px)" }} />
           <Sidebar category={category} setCategory={handleCategory} stats={stats} syncing={syncing} onSync={syncAll}
-            onClose={()=>setSbOpen(false)} isMobile getCount={getCount} folders={folders} folder={folder} setFolder={setFolder} />
+            onClose={() => setSbOpen(false)} isMobile getCount={getCount} folders={folders} folder={folder} setFolder={setFolder} />
         </>
       )}
 
-      <main style={S.main}>
-        {/* COMPACT TOPBAR — one row only */}
-        <div style={S.topbar}>
-          <button className="mobile-btn" style={S.menuBtn} onClick={()=>setSbOpen(true)}>☰</button>
-          <div style={{ flex:1, position:"relative", display:"flex", alignItems:"center" }}>
-            <span style={{ position:"absolute", left:10, fontSize:14 }}>🔍</span>
-            <input style={S.search} placeholder="Search…" value={query} onChange={e=>handleSearch(e.target.value)} />
-            {query && <button onClick={()=>handleSearch("")} style={{ position:"absolute", right:8, background:"none", border:"none", cursor:"pointer", color:"#8b8fa8", fontSize:13 }}>✕</button>}
+      {/* Main content */}
+      <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, paddingBottom: playerOpen ? 76 : 0 }}>
+        {/* Topbar */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", background: "white", borderBottom: "1px solid #e8eaf2", flexShrink: 0, boxShadow: "0 1px 8px rgba(0,0,0,0.04)" }}>
+          <button className="mobile-btn" style={{ background: "#f0f2f8", border: "1px solid #e8eaf2", borderRadius: 9, color: "#6c63ff", width: 36, height: 36, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setSbOpen(true)}>☰</button>
+          <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
+            <span style={{ position: "absolute", left: 11, fontSize: 13, color: "#aab0c6" }}>🔍</span>
+            <input style={{ width: "100%", background: "#f5f6fa", border: "1.5px solid #e8eaf2", borderRadius: 10, padding: "8px 32px 8px 34px", fontSize: 13, fontWeight: 600, color: "#1a1a2e", outline: "none", transition: "border 0.2s" }}
+              placeholder="Search files…" value={query} onChange={e => handleSearch(e.target.value)}
+              onFocus={e => e.target.style.borderColor = "#6c63ff"}
+              onBlur={e => e.target.style.borderColor = "#e8eaf2"} />
+            {query && <button onClick={() => handleSearch("")} style={{ position: "absolute", right: 10, background: "none", border: "none", cursor: "pointer", color: "#aab0c6", fontSize: 13 }}>✕</button>}
           </div>
-          {/* Sort dropdown */}
-          <select value={`${sortBy}-${sortDir}`} onChange={e=>{ const [b,d] = e.target.value.split("-"); setSortBy(b); setSortDir(d); }} style={S.sortSel}>
+          <select value={`${sortBy}-${sortDir}`} onChange={e => { const [b, d] = e.target.value.split("-"); setSortBy(b); setSortDir(d); }}
+            style={{ background: "#f5f6fa", border: "1.5px solid #e8eaf2", borderRadius: 10, padding: "8px 10px", fontSize: 11, fontWeight: 700, color: "#6c63ff", cursor: "pointer" }}>
             <option value="date-desc">Newest</option>
             <option value="date-asc">Oldest</option>
             <option value="name-asc">Name A→Z</option>
@@ -409,20 +701,23 @@ export default function App() {
             <option value="size-desc">Largest</option>
             <option value="size-asc">Smallest</option>
           </select>
-          {!loading && <span style={S.countBadge}>{total.toLocaleString()}</span>}
+          {/* View toggle */}
+          <div style={{ display: "flex", background: "#f5f6fa", border: "1.5px solid #e8eaf2", borderRadius: 10, overflow: "hidden" }}>
+            {[["grid","⊞"],["list","☰"]].map(([mode, icon]) => (
+              <button key={mode} onClick={() => setViewMode(mode)} style={{ padding: "7px 10px", border: "none", cursor: "pointer", fontSize: 14, background: viewMode === mode ? "#6c63ff" : "transparent", color: viewMode === mode ? "white" : "#aab0c6", transition: "all 0.15s" }}>{icon}</button>
+            ))}
+          </div>
+          {!loading && <span style={{ fontSize: 11, color: "#aab0c6", fontWeight: 700, background: "#f5f6fa", padding: "5px 10px", borderRadius: 20, whiteSpace: "nowrap" }}>{total.toLocaleString()}</span>}
         </div>
 
-        {/* MOBILE: horizontal category pills (compact) */}
-        <div className="mobile-only" style={{ padding:"8px 12px 0", overflowX:"auto" }}>
-          <div style={{ display:"flex", gap:6 }}>
+        {/* Mobile category pills */}
+        <div className="mobile-only" style={{ padding: "8px 12px 0", overflowX: "auto" }}>
+          <div style={{ display: "flex", gap: 6 }}>
             {CATEGORIES.map(c => {
               const active = category === c.key;
-              const col = (c.key && !c.key.startsWith("__")) ? getColor(c.key) : { bg:"#ede9ff", text:"#6c63ff" };
+              const col = (c.key && !c.key.startsWith("__")) ? getColor(c.key) : { bg: "#ede9ff", text: "#6c63ff" };
               return (
-                <button key={c.key||"all"} onClick={()=>handleCategory(c.key)} style={{
-                  background: active ? col.bg : "white", color: active ? col.text : "#8b8fa8",
-                  border: `1.5px solid ${active ? col.text : "#e4e7f0"}`, borderRadius: 20,
-                  padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                <button key={c.key || "all"} onClick={() => handleCategory(c.key)} style={{ background: active ? col.bg : "white", color: active ? col.text : "#8b8fa8", border: `1.5px solid ${active ? col.text : "#e8eaf2"}`, borderRadius: 20, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
                   {c.emoji} {c.label}
                 </button>
               );
@@ -430,138 +725,96 @@ export default function App() {
           </div>
         </div>
 
-        {/* Folder chips when in folders view */}
+        {/* Folder chips */}
         {showFolders && (
-          <div style={{ padding:"10px 14px 0", overflowX:"auto" }}>
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-              <button onClick={()=>setFolder("")} style={{ ...S.pill, background: folder==="" ? "#ede9ff" : "white", color: folder==="" ? "#6c63ff" : "#8b8fa8", borderColor: folder==="" ? "#6c63ff" : "#e4e7f0" }}>
-                📂 Unfiled
-              </button>
-              {folders.map(f => (
-                <button key={f.id} onClick={()=>setFolder(f.id)} style={{ ...S.pill, background: folder===f.id ? "#ede9ff" : "white", color: folder===f.id ? "#6c63ff" : "#8b8fa8", borderColor: folder===f.id ? "#6c63ff" : "#e4e7f0" }}>
-                  📁 {f.name}
-                </button>
+          <div style={{ padding: "10px 14px 0", overflowX: "auto" }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {[{ id: "", name: "📂 Unfiled" }, ...folders.map(f => ({ id: f.id, name: `📁 ${f.name}` }))].map(f => (
+                <button key={f.id} onClick={() => setFolder(f.id)} style={{ borderRadius: 20, padding: "5px 14px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", border: `1.5px solid ${folder === f.id ? "#6c63ff" : "#e8eaf2"}`, background: folder === f.id ? "#ede9ff" : "white", color: folder === f.id ? "#6c63ff" : "#8b8fa8", transition: "all 0.15s" }}>{f.name}</button>
               ))}
             </div>
           </div>
         )}
 
-        {/* Grid — maximum space */}
-        <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
+        {/* File grid / list */}
+        <div style={{ flex: 1, overflowY: "auto", padding: 14 }}>
           {loading ? (
-            <div style={S.center}>
-              <div style={S.spinner} />
-              <p style={{ marginTop: 14, color: "#8b8fa8" }}>Loading…</p>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "50vh", color: "#8b8fa8" }}>
+              <div style={{ width: 44, height: 44, border: "3px solid #e8eaf2", borderTopColor: "#6c63ff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+              <p style={{ marginTop: 14, fontWeight: 700 }}>Loading…</p>
             </div>
           ) : files.length === 0 ? (
-            <div style={S.center}>
-              <span style={{ fontSize: 56 }}>📭</span>
-              <p style={{ fontWeight: 800, fontSize: 16, marginTop: 12 }}>No files</p>
-              <p style={{ fontSize: 13, color: "#8b8fa8", marginTop: 4 }}>{showFolders && folder===null ? "Pick a folder" : "Try syncing"}</p>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "50vh", color: "#8b8fa8" }}>
+              <span style={{ fontSize: 60 }}>📭</span>
+              <p style={{ fontWeight: 900, fontSize: 17, marginTop: 14, color: "#1a1a2e" }}>No files here</p>
+              <p style={{ fontSize: 13, marginTop: 6 }}>{showFolders && folder === null ? "Pick a folder" : "Try syncing"}</p>
+            </div>
+          ) : viewMode === "grid" ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(145px, 1fr))", gap: 12 }}>
+              {files.map(f => <Card key={f.id} file={f} token={token} onPreview={handlePreview} onFav={toggleFav} onMenu={setMenuFile} nowPlayingId={nowPlaying?.file?.id} />)}
             </div>
           ) : (
-            <div style={S.grid}>
-              {files.map(f => <Card key={f.id} file={f} token={token} onPreview={setPreview} onFav={toggleFav} onMenu={setMenuFile} />)}
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {files.map(f => {
+                const kind = getKind(f); const col = getColor(f.category);
+                const url = `${API}/api/media/${token}/${f.id}`;
+                const isNP = nowPlaying?.file?.id === f.id;
+                return (
+                  <div key={f.id} className="list-row" onClick={() => handlePreview(f)}
+                    style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", background: isNP ? "#ede9ff" : "white", borderRadius: 10, cursor: "pointer", border: `1.5px solid ${isNP ? "#c4beff" : f.favorite ? "#ffd96a" : "#e8eaf2"}`, transition: "all 0.15s" }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 9, background: kind === "image" ? "#000" : col.bg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, fontSize: 18 }}>
+                      {kind === "image" ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : getEmoji(kind)}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontSize: 13, fontWeight: 700, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.filename}</p>
+                      <p style={{ fontSize: 11, color: "#aab0c6", fontWeight: 600 }}>{fmtSize(f.size)} · {fmtDate(f.date)}</p>
+                    </div>
+                    {isNP && <EqBars playing={true} />}
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={e => { e.stopPropagation(); toggleFav(f); }} style={{ background: "none", border: "none", fontSize: 16, cursor: "pointer", color: f.favorite ? "#ffc107" : "#d4d8eb" }}>{f.favorite ? "★" : "☆"}</button>
+                      {f.tg_link && <a href={f.tg_link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{ ...S.smallBtn, background: "#e8f4fd", color: "#229ED9", textDecoration: "none" }}>✈</a>}
+                      <button onClick={e => { e.stopPropagation(); setMenuFile(f); }} style={{ ...S.smallBtn, background: "#f0f2f8", color: "#6b6b72" }}>⋯</button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
 
+        {/* Pagination */}
         {pages > 1 && (
-          <div style={S.pager}>
-            <button style={S.pBtn} disabled={page <= 1} onClick={()=>setPage(p=>p-1)}>←</button>
-            <span style={{ fontSize: 12, color: "#8b8fa8", fontWeight: 700 }}>{page} / {pages}</span>
-            <button style={S.pBtn} disabled={page >= pages} onClick={()=>setPage(p=>p+1)}>→</button>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #e8eaf2", background: "white", flexShrink: 0 }}>
+            <button style={{ background: "#f5f6fa", border: "1.5px solid #e8eaf2", borderRadius: 9, color: "#1a1a2e", padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, transition: "all 0.15s" }} disabled={page <= 1} onClick={() => setPage(p => p - 1)}>← Prev</button>
+            <span style={{ fontSize: 12, color: "#8b8fa8", fontWeight: 700 }}>Page {page} of {pages}</span>
+            <button style={{ background: "#f5f6fa", border: "1.5px solid #e8eaf2", borderRadius: 9, color: "#1a1a2e", padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, transition: "all 0.15s" }} disabled={page >= pages} onClick={() => setPage(p => p + 1)}>Next →</button>
           </div>
         )}
       </main>
 
-      {preview && <Preview file={preview} token={token} onClose={()=>setPreview(null)} />}
-      {menuFile && <ActionMenu file={menuFile} token={token} folders={folders} onClose={()=>setMenuFile(null)}
-        onFolderChange={()=>{ fetchFiles(realCategory, query, page, sortBy, sortDir, showFavorites, showFolders ? folder : null); fetchStats(); }} />}
-    </div>
-  );
-}
+      {/* Audio Player (always rendered, hidden when no track) */}
+      <AudioPlayer nowPlaying={nowPlaying} setNowPlaying={setNowPlaying} token={token} />
 
-function Sidebar({ category, setCategory, stats, syncing, onSync, onClose, isMobile, getCount, folders, folder, setFolder }) {
-  return (
-    <div style={{ ...S.sidebar, ...(isMobile ? S.mobileSb : {}) }}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", paddingBottom:14, borderBottom:"1px solid #e4e7f0", marginBottom:10 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <div style={S.logoMark}>✦</div><span style={{ fontWeight:900, fontSize:18 }}>AirDrive</span>
-        </div>
-        {isMobile && <button onClick={onClose} style={{ background:"none", border:"none", fontSize:18, cursor:"pointer", color:"#8b8fa8" }}>✕</button>}
-      </div>
-      <button style={{ ...S.syncBtn, opacity: syncing ? 0.7 : 1 }} onClick={onSync} disabled={syncing}>
-        ⟳ {syncing ? "Syncing…" : "Sync"}
-      </button>
-      <nav style={{ display:"flex", flexDirection:"column", gap:2, marginTop:8, flex:1, overflowY:"auto" }}>
-        {CATEGORIES.map(c => {
-          const active = category === c.key;
-          const col = (c.key && !c.key.startsWith("__")) ? getColor(c.key) : { bg:"#ede9ff", text:"#6c63ff" };
-          const count = getCount(c.key);
-          return (
-            <button key={c.key||"all"} style={{ ...S.navItem, background: active ? col.bg : "transparent", color: active ? col.text : "#6b6b72", fontWeight: active ? 800 : 600 }}
-              onClick={() => { setCategory(c.key); if (isMobile) onClose(); }}>
-              <span style={{ fontSize:15, width:20, textAlign:"center" }}>{c.emoji}</span>
-              <span style={{ flex:1, textAlign:"left" }}>{c.label}</span>
-              {count != null && <span style={{ fontSize:10, fontWeight:700, padding:"2px 6px", borderRadius:20, background: active ? col.text : "#f0f2f8", color: active ? "white" : "#8b8fa8" }}>{count.toLocaleString()}</span>}
-            </button>
-          );
-        })}
-      </nav>
-      {stats && (
-        <div style={{ borderTop:"1px solid #e4e7f0", paddingTop:12 }}>
-          <p style={{ fontSize:18, fontWeight:900, background:"linear-gradient(135deg,#6c63ff,#ff6584)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>
-            {stats.total_files?.toLocaleString()}
-          </p>
-          <p style={{ fontSize:11, color:"#8b8fa8", fontWeight:600 }}>{fmtSize(stats.total_size)}</p>
-        </div>
-      )}
+      {preview && <Preview file={preview} token={token} onClose={() => setPreview(null)} />}
+      {menuFile && <ActionMenu file={menuFile} token={token} folders={folders} onClose={() => setMenuFile(null)}
+        onFolderChange={() => { fetchFiles(realCategory, query, page, sortBy, sortDir, showFavorites, showFolders ? folder : null); fetchStats(); }} />}
     </div>
   );
 }
 
 const S = {
-  app: { display:"flex", height:"100vh", overflow:"hidden", background:"#f5f6fa" },
-  sidebar: { width:220, background:"white", borderRight:"1px solid #e4e7f0", display:"flex", flexDirection:"column", padding:"16px 12px", flexShrink:0, overflowY:"hidden" },
-  mobileSb: { position:"fixed", top:0, left:0, bottom:0, zIndex:100, width:260, boxShadow:"4px 0 24px rgba(0,0,0,0.15)" },
-  logoMark: { width:34, height:34, background:"linear-gradient(135deg,#6c63ff,#ff6584)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, color:"white", fontWeight:900 },
-  syncBtn: { width:"100%", padding:"9px 14px", background:"linear-gradient(135deg,#6c63ff,#8b83ff)", border:"none", borderRadius:9, color:"white", fontSize:12, fontWeight:800, cursor:"pointer", boxShadow:"0 4px 12px rgba(108,99,255,0.3)" },
-  navItem: { display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderRadius:9, border:"none", cursor:"pointer", fontSize:12, width:"100%" },
-  main: { flex:1, display:"flex", flexDirection:"column", overflow:"hidden", minWidth:0 },
-  topbar: { display:"flex", alignItems:"center", gap:8, padding:"10px 12px", background:"white", borderBottom:"1px solid #e4e7f0", flexShrink:0 },
-  menuBtn: { background:"#f0f2f8", border:"1px solid #e4e7f0", borderRadius:8, color:"#6c63ff", width:34, height:34, cursor:"pointer", fontSize:16, alignItems:"center", justifyContent:"center" },
-  search: { width:"100%", background:"#f5f6fa", border:"1.5px solid #e4e7f0", borderRadius:8, padding:"7px 30px 7px 32px", fontSize:13, fontWeight:600, outline:"none" },
-  sortSel: { background:"#f0f2f8", border:"1.5px solid #e4e7f0", borderRadius:8, padding:"7px 8px", fontSize:11, fontWeight:700, color:"#6c63ff", cursor:"pointer", outline:"none" },
-  countBadge: { fontSize:11, color:"#8b8fa8", fontWeight:700, background:"#f0f2f8", padding:"4px 9px", borderRadius:20, whiteSpace:"nowrap" },
-  pill: { borderRadius:20, padding:"4px 10px", fontSize:11, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap", border:"1.5px solid #e4e7f0" },
-  grid: { display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(140px, 1fr))", gap:10 },
-  card: { background:"white", border:"2px solid #e4e7f0", borderRadius:12, overflow:"hidden", cursor:"pointer", transition:"all 0.2s", display:"flex", flexDirection:"column" },
-  thumb: { height:100, display:"flex", alignItems:"center", justifyContent:"center", position:"relative", overflow:"hidden" },
-  starBtn: { position:"absolute", top:6, right:6, background:"none", border:"none", fontSize:20, cursor:"pointer", lineHeight:1, padding:2 },
-  fname: { fontSize:11, fontWeight:700, color:"#1a1a2e", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", marginBottom:3 },
-  smallBtn: { border:"none", borderRadius:6, padding:"3px 10px", fontSize:12, fontWeight:800, cursor:"pointer" },
-  center: { display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"50vh", color:"#8b8fa8" },
-  spinner: { width:44, height:44, border:"3px solid #e4e7f0", borderTopColor:"#6c63ff", borderRadius:"50%", animation:"spin 0.8s linear infinite" },
-  pager: { display:"flex", alignItems:"center", justifyContent:"center", gap:10, padding:10, borderTop:"1px solid #e4e7f0", background:"white" },
-  pBtn: { background:"#f5f6fa", border:"1.5px solid #e4e7f0", borderRadius:8, color:"#1a1a2e", padding:"5px 12px", cursor:"pointer", fontSize:12, fontWeight:700 },
-  overlay: { position:"fixed", inset:0, background:"rgba(26,26,46,0.7)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200, backdropFilter:"blur(8px)", padding:12 },
-  modal: { background:"white", border:"1px solid #e4e7f0", borderRadius:14, width:"100%", maxWidth:1000, maxHeight:"95vh", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative" },
-  modalClose: { position:"absolute", top:10, right:10, background:"rgba(255,255,255,0.95)", border:"1px solid #e4e7f0", borderRadius:8, color:"#1a1a2e", width:32, height:32, cursor:"pointer", fontSize:13, fontWeight:700, zIndex:10 },
-  modalTitle: { padding:"12px 52px 10px 14px", fontSize:13, fontWeight:700, color:"#1a1a2e", borderBottom:"1px solid #e4e7f0", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", flexShrink:0 },
-  tab: { flex:1, padding:"10px 12px", background:"none", border:"none", fontSize:13, fontWeight:700, color:"#8b8fa8", cursor:"pointer" },
-  tabActive: { color:"#6c63ff", borderBottom:"2px solid #6c63ff" },
-  listBtn: { textAlign:"left", padding:"10px 12px", background:"#f5f6fa", border:"1px solid #e4e7f0", borderRadius:8, fontSize:13, cursor:"pointer" },
-  vArea: { flex:1, overflow:"auto", display:"flex", alignItems:"center", justifyContent:"center", background:"#1a1a2e", minHeight:250 },
-  vImg: { maxWidth:"100%", maxHeight:"78vh", objectFit:"contain" },
-  vVid: { width:"100%", maxHeight:"78vh", background:"#000" },
-  vFrame: { width:"100%", height:"78vh", border:"none", background:"white" },
-  audioBox: { display:"flex", flexDirection:"column", alignItems:"center", padding:40, background:"white", width:"100%" },
-  unsupBox: { display:"flex", flexDirection:"column", alignItems:"center", padding:40, background:"white", width:"100%" },
-  modalFooter: { display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderTop:"1px solid #e4e7f0", fontSize:12, fontWeight:600, color:"#8b8fa8", flexShrink:0 },
-  loginWrap: { minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"radial-gradient(ellipse 70% 60% at 10% 90%, #ede9ff 0%, transparent 60%), #f5f6fa" },
-  loginCard: { width:"min(380px, 92vw)", padding:"44px 36px", background:"white", borderRadius:20, boxShadow:"0 8px 32px rgba(108,99,255,0.15)", display:"flex", flexDirection:"column", gap:18 },
-  input: { background:"#f5f6fa", border:"2px solid #e4e7f0", borderRadius:10, padding:"10px 14px", fontSize:13, fontWeight:600, color:"#1a1a2e", outline:"none" },
-  btnP: { background:"linear-gradient(135deg,#6c63ff,#8b83ff)", color:"white", border:"none", borderRadius:9, padding:"10px 18px", fontWeight:800, fontSize:13, cursor:"pointer", boxShadow:"0 4px 12px rgba(108,99,255,0.3)" },
-  errBox: { color:"#d63384", fontSize:12, fontWeight:700, background:"#fff0f6", padding:"8px 12px", borderRadius:8 },
+  sidebar: { width: 224, background: "white", borderRight: "1px solid #e8eaf2", display: "flex", flexDirection: "column", padding: "16px 12px", flexShrink: 0, overflowY: "hidden" },
+  mobileSb: { position: "fixed", top: 0, left: 0, bottom: 0, zIndex: 100, width: 264, boxShadow: "6px 0 32px rgba(0,0,0,0.18)" },
+  card: { background: "white", border: "2px solid #e8eaf2", borderRadius: 14, overflow: "hidden", cursor: "pointer", display: "flex", flexDirection: "column" },
+  thumb: { height: 108, display: "flex", alignItems: "center", justifyContent: "center", position: "relative", overflow: "hidden" },
+  fname: { fontSize: 11, fontWeight: 700, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginBottom: 3 },
+  smallBtn: { border: "none", borderRadius: 7, padding: "3px 10px", fontSize: 12, fontWeight: 800, cursor: "pointer" },
+  overlay: { position: "fixed", inset: 0, background: "rgba(12,12,28,0.72)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(10px)", padding: 12 },
+  modal: { background: "white", borderRadius: 16, width: "100%", maxWidth: 1000, maxHeight: "95vh", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", boxShadow: "0 24px 80px rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.12)" },
+  modalClose: { position: "absolute", top: 10, right: 10, background: "rgba(255,255,255,0.95)", border: "1px solid #e8eaf2", borderRadius: 9, color: "#1a1a2e", width: 32, height: 32, cursor: "pointer", fontSize: 13, fontWeight: 700, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "center" },
+  modalTitle: { padding: "13px 52px 11px 16px", fontSize: 13, fontWeight: 700, color: "#1a1a2e", borderBottom: "1px solid #e8eaf2", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 },
+  listBtn: { textAlign: "left", padding: "10px 12px", background: "#f5f6fa", border: "1.5px solid #e8eaf2", borderRadius: 10, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", transition: "all 0.15s" },
+  input: { background: "#f5f6fa", border: "2px solid #e8eaf2", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, color: "#1a1a2e", outline: "none", width: "100%", transition: "border 0.2s" },
+  btnP: { background: "linear-gradient(135deg,#6c63ff,#8b83ff)", color: "white", border: "none", borderRadius: 10, padding: "11px 18px", fontWeight: 800, fontSize: 13, cursor: "pointer", boxShadow: "0 4px 14px rgba(108,99,255,0.3)", textAlign: "center" },
+  pCtrl: { background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.7)", padding: "6px", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 6, transition: "color 0.15s, background 0.15s", fontSize: 18 },
 };
