@@ -136,6 +136,10 @@ def verify_token(c: HTTPAuthorizationCredentials = Depends(security)):
 async def health():
     return {"status": "AirDrive API running"}
 
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
 @app.post("/api/login")
 async def login(body: dict):
     if body.get("password") != APP_PASSWORD:
