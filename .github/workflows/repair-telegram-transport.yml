@@ -16,62 +16,24 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Patch backend streaming recovery
-        shell: python
+      - name: Patch backend
         run: |
+          python3 <<'PY'
           from pathlib import Path
 
-          p = Path('backend/main.py')
-          s = p.read_text(encoding='utf-8')
+          p = Path("backend/main.py")
+          s = p.read_text(encoding="utf-8")
 
-          old = '''# Telegram file references are temporary. The file index stores the origin
-# channel/message IDs as the durable source of truth. Always refresh the origin
-# message before starting a stream so Pyrogram receives a current file_reference.
-async def _fresh_media_source(file):
-    channel_id = file.get("channel_id")
-    message_id = file.get("message_id")
-    if channel_id is not None and message_id:
-        try:
-            message = await pyro_client.get_messages(channel_id, message_id, replies=0)
-            if message and not getattr(message, "empty", False):
-                if any(getattr(message, attr, None) is not None for attr in (
-                    "document", "video", "audio", "photo", "animation", "voice", "video_note"
-                )):
-                    return message
-        except Exception as e:
-            print(f"⚠️ Could not refresh Telegram message {channel_id}/{message_id}: {e}")
-    return file.get("file_id")
+          start = s.index("# Telegram file references are temporary.")
+          end = s.index("async def _stream_file", start)
 
-async def _stream_media_with_refresh(file, *, offset=0, limit=0):
-    source = await _fresh_media_source(file)
-    if not source:
-        raise RuntimeError("No Telegram media source available")
-    try:
-        async for chunk in pyro_client.stream_media(source, offset=offset, limit=limit):
-            if chunk:
-                yield chunk
-    except Exception as e:
-        # Telegram can expire a reference between message refresh and upload.GetFile.
-        # Re-fetch the origin message once and retry with its fresh file_reference.
-        if e.__class__.__name__ != "FileReferenceExpired":
-            raise
-        print(f"♻️ Telegram file reference expired; refreshing {file.get('channel_id')}/{file.get('message_id')}")
-        fresh = await _fresh_media_source(file)
-        if not fresh or fresh == source:
-            raise
-        async for chunk in pyro_client.stream_media(fresh, offset=offset, limit=limit):
-            if chunk:
-                yield chunk
-
-'''
-
-          new = '''# Telegram file references are temporary. The file index stores the origin
+          new = r'''# Telegram file references are temporary. The file index stores the origin
 # channel/message IDs as the durable source of truth. The main Pyrogram transport can
 # also die independently of the media transport, so refreshes must recover that
 # connection instead of falling back to the stale file_id.
 _tg_refresh_lock = asyncio.Lock()
 _tg_reconnect_lock = asyncio.Lock()
-_tg_message_cache: dict = {}  # (channel_id, message_id) -> (monotonic_time, Message)
+_tg_message_cache: dict = {}
 _TG_MESSAGE_CACHE_TTL = 120.0
 
 
@@ -90,22 +52,11 @@ def _is_transport_error(exc: Exception) -> bool:
 
 
 async def _recover_pyrogram_transport():
-    """Restart only the main Pyrogram client when its RPC transport is dead.
-
-    Media downloads use Pyrogram's separate media sessions, so this recovery is
-    only triggered while resolving the origin message and is protected by a lock
-    to prevent several HTTP Range requests from restarting the client together.
-    """
     if pyro_client is None:
         raise RuntimeError("Telegram client is not initialized")
-
     async with _tg_reconnect_lock:
         print("♻️ Telegram RPC transport appears closed; restarting Pyrogram client")
-        try:
-            await pyro_client.restart()
-        except Exception as restart_error:
-            print(f"⚠️ Pyrogram restart failed: {restart_error}")
-            raise
+        await pyro_client.restart()
         print("✅ Pyrogram client restarted")
 
 
@@ -113,24 +64,18 @@ async def _fresh_media_source(file, *, force=False):
     channel_id = file.get("channel_id")
     message_id = file.get("message_id")
     if channel_id is None or not message_id:
-        # Legacy index entries may not have origin metadata. Keep their stored
-        # file_id as a last resort; newer entries always have channel/message IDs.
         return file.get("file_id")
 
     key = (int(channel_id), int(message_id))
-    now = time.monotonic()
-
     if not force:
         cached = _tg_message_cache.get(key)
-        if cached and (now - cached[0]) < _TG_MESSAGE_CACHE_TTL:
+        if cached and (time.monotonic() - cached[0]) < _TG_MESSAGE_CACHE_TTL:
             return cached[1]
 
     async with _tg_refresh_lock:
-        # Another concurrent Range request may already have refreshed this file.
-        now = time.monotonic()
         if not force:
             cached = _tg_message_cache.get(key)
-            if cached and (now - cached[0]) < _TG_MESSAGE_CACHE_TTL:
+            if cached and (time.monotonic() - cached[0]) < _TG_MESSAGE_CACHE_TTL:
                 return cached[1]
 
         last_error = None
@@ -154,9 +99,6 @@ async def _fresh_media_source(file, *, force=False):
                     continue
                 break
 
-        # Do not silently fall back to an expired file_reference after a transport
-        # failure. That was the reason the previous implementation kept returning
-        # 206 while Telegram rejected upload.GetFile with FILE_REFERENCE_EXPIRED.
         if last_error:
             print(f"⚠️ Could not refresh Telegram message {channel_id}/{message_id}: {last_error}")
             raise last_error
@@ -172,26 +114,22 @@ async def _stream_media_with_refresh(file, *, offset=0, limit=0):
             if chunk:
                 yield chunk
     except Exception as e:
-        # Telegram can expire a reference between message refresh and upload.GetFile.
-        # Invalidate the cached message, fetch the origin again, then retry once.
         if e.__class__.__name__ != "FileReferenceExpired":
             raise
         print(f"♻️ Telegram file reference expired; forcing origin refresh {file.get('channel_id')}/{file.get('message_id')}")
         fresh = await _fresh_media_source(file, force=True)
-        if not fresh:
-            raise
         async for chunk in pyro_client.stream_media(fresh, offset=offset, limit=limit):
             if chunk:
                 yield chunk
 
+
 '''
 
-          if old not in s:
-              raise SystemExit('expected streaming helper block not found')
-          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          p.write_text(s[:start] + new + s[end:], encoding="utf-8")
+          PY
 
       - name: Verify backend syntax
-        run: python -m py_compile backend/main.py
+        run: python3 -m py_compile backend/main.py
 
       - name: Commit backend fix
         run: |
