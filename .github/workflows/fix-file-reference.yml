@@ -1,0 +1,66 @@
+name: Repair Telegram File References
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-file-reference.yml'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Patch media streaming
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('backend/main.py')
+          s = p.read_text(encoding='utf-8')
+
+          old_import = 'from pyrogram import Client\n'
+          new_import = 'from pyrogram import Client\n'
+          if old_import not in s:
+              raise SystemExit('expected pyrogram import not found')
+
+          marker = '# ── Streaming logic ───────────────────────────────────────────────────────────\n'
+          if marker not in s:
+              raise SystemExit('streaming marker not found')
+
+          helper = '''# Telegram file references are temporary. The file index stores the origin\n# channel/message IDs as the durable source of truth. Always refresh the origin\n# message before starting a stream so Pyrogram receives a current file_reference.\nasync def _fresh_media_source(file):\n    channel_id = file.get("channel_id")\n    message_id = file.get("message_id")\n    if channel_id is not None and message_id:\n        try:\n            message = await pyro_client.get_messages(channel_id, message_id, replies=0)\n            if message and not getattr(message, "empty", False):\n                if any(getattr(message, attr, None) is not None for attr in (\n                    "document", "video", "audio", "photo", "animation", "voice", "video_note"\n                )):\n                    return message\n        except Exception as e:\n            print(f"⚠️ Could not refresh Telegram message {channel_id}/{message_id}: {e}")\n    return file.get("file_id")\n\nasync def _stream_media_with_refresh(file, *, offset=0, limit=0):\n    source = await _fresh_media_source(file)\n    if not source:\n        raise RuntimeError("No Telegram media source available")\n    try:\n        async for chunk in pyro_client.stream_media(source, offset=offset, limit=limit):\n            if chunk:\n                yield chunk\n    except Exception as e:\n        # Telegram can expire a reference between message refresh and upload.GetFile.\n        # Re-fetch the origin message once and retry with its fresh file_reference.\n        if e.__class__.__name__ != "FileReferenceExpired":\n            raise\n        print(f"♻️ Telegram file reference expired; refreshing {file.get('channel_id')}/{file.get('message_id')}")\n        fresh = await _fresh_media_source(file)\n        if not fresh or fresh == source:\n            raise\n        async for chunk in pyro_client.stream_media(fresh, offset=offset, limit=limit):\n            if chunk:\n                yield chunk\n\n'''
+
+          if '_fresh_media_source' not in s:
+              s = s.replace(marker, marker + '\n' + helper, 1)
+
+          s = s.replace(
+              'async for chunk in pyro_client.stream_media(file["file_id"]):',
+              'async for chunk in _stream_media_with_refresh(file):',
+              1,
+          )
+
+          s = s.replace(
+              'async for chunk in pyro_client.stream_media(file["file_id"], offset=chunk_offset, limit=part_count):',
+              'async for chunk in _stream_media_with_refresh(file, offset=chunk_offset, limit=part_count):',
+              1,
+          )
+
+          p.write_text(s, encoding='utf-8')
+
+      - name: Verify patch
+        run: |
+          python -m py_compile backend/main.py
+          grep -n "_fresh_media_source\|_stream_media_with_refresh" backend/main.py
+
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/main.py
+          git diff --cached --quiet && { echo "No changes"; exit 0; }
+          git commit -m "fix: refresh Telegram file references before streaming"
+          git push
