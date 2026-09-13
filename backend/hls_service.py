@@ -64,9 +64,6 @@ async def _run_ffmpeg(file: dict, out_dir: Path):
     for i in range(3):
         (out_dir / f"v{i}").mkdir(parents=True, exist_ok=True)
 
-    # Each rendition maps optional audio independently. This avoids the
-    # var_stream_map failure that occurs for silent videos and also forces
-    # yuv420p so H.264 Main works with 4:4:4/other source pixel formats.
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",
@@ -97,25 +94,46 @@ async def _run_ffmpeg(file: dict, out_dir: Path):
         "-hls_segment_filename", str(out_dir / "v2" / "seg_%05d.ts"), str(out_dir / "v2" / "playlist.m3u8"),
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-    )
-    feeder = asyncio.create_task(_write_telegram_to_pipe(file, proc.stdin))
-    try:
-        _, stderr = await asyncio.gather(proc.wait(), proc.stderr.read())
-    finally:
-        if not feeder.done():
-            feeder.cancel()
-            try:
-                await feeder
-            except asyncio.CancelledError:
-                pass
+    # A Telegram transport error used to be hidden because the feeder task was
+    # not awaited. FFmpeg then saw a truncated pipe and reported "partial file".
+    # Retry the complete transcode when the feeder or FFmpeg fails.
+    last_error = None
+    for attempt in range(1, 3):
+        if attempt > 1:
+            for i in range(3):
+                shutil.rmtree(out_dir / f"v{i}", ignore_errors=True)
+                (out_dir / f"v{i}").mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        feeder = asyncio.create_task(_write_telegram_to_pipe(file, proc.stdin))
+        try:
+            proc_result, stderr, feeder_result = await asyncio.gather(
+                proc.wait(), proc.stderr.read(), feeder, return_exceptions=True
+            )
+        finally:
+            if not feeder.done():
+                feeder.cancel()
+                try:
+                    await feeder
+                except asyncio.CancelledError:
+                    pass
 
-    if proc.returncode != 0:
-        detail = stderr.decode("utf-8", "ignore")[-6000:]
-        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {detail}")
-    _write_master(out_dir)
+        if isinstance(proc_result, Exception):
+            last_error = proc_result
+        elif isinstance(feeder_result, Exception):
+            last_error = RuntimeError(f"Telegram media feeder failed: {feeder_result}")
+        elif proc.returncode != 0:
+            detail = stderr.decode("utf-8", "ignore")[-6000:]
+            last_error = RuntimeError(f"ffmpeg failed ({proc.returncode}): {detail}")
+        else:
+            _write_master(out_dir)
+            return
+
+        print(f"⚠️ HLS attempt {attempt}/2 failed for file {file.get('id')}: {last_error}", flush=True)
+
+    raise last_error or RuntimeError("HLS preparation failed")
 
 
 async def prepare_hls(file_id: int):
