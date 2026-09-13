@@ -47,20 +47,16 @@ async def _write_telegram_to_pipe(file: dict, pipe):
 
 
 def _write_master(out_dir: Path):
-    variants = [
-        ("v0", 256, 144, 150000),
-        ("v1", 426, 240, 280000),
-        ("v2", 640, 360, 550000),
-    ]
+    variants = [("v0", 256, 144, 150000), ("v1", 426, 240, 280000), ("v2", 640, 360, 550000)]
     lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
     for name, width, height, bandwidth in variants:
         playlist = out_dir / name / "playlist.m3u8"
         if not playlist.exists():
             raise RuntimeError(f"missing HLS variant playlist: {name}")
-        lines.extend([
+        lines += [
             f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={width}x{height}",
             f"{name}/playlist.m3u8",
-        ])
+        ]
     (out_dir / "master.m3u8").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -68,50 +64,42 @@ async def _run_ffmpeg(file: dict, out_dir: Path):
     for i in range(3):
         (out_dir / f"v{i}").mkdir(parents=True, exist_ok=True)
 
-    # Do not use -var_stream_map here. It makes the whole encode fail when a
-    # Telegram video has no audio stream. Each rendition independently maps
-    # optional audio, so both normal and silent videos are supported.
+    # Each rendition maps optional audio independently. This avoids the
+    # var_stream_map failure that occurs for silent videos and also forces
+    # yuv420p so H.264 Main works with 4:4:4/other source pixel formats.
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",
         "-filter_complex", "[0:v:0]split=3[v144][v240][v360]",
+
         "-map", "[v144]", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main",
-        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96",
-        "-force_key_frames", "expr:gte(t,n_forced*4)",
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
         "-s:v", "256x144", "-b:v", "120k", "-maxrate", "150k", "-bufsize", "240k",
         "-c:a", "aac", "-ar", "44100", "-b:a", "32k", "-ac", "2",
-        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
-        "-hls_flags", "independent_segments",
-        "-hls_segment_filename", str(out_dir / "v0" / "seg_%05d.ts"),
-        str(out_dir / "v0" / "playlist.m3u8"),
+        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
+        "-hls_segment_filename", str(out_dir / "v0" / "seg_%05d.ts"), str(out_dir / "v0" / "playlist.m3u8"),
+
         "-map", "[v240]", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main",
-        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96",
-        "-force_key_frames", "expr:gte(t,n_forced*4)",
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
         "-s:v", "426x240", "-b:v", "220k", "-maxrate", "280k", "-bufsize", "440k",
         "-c:a", "aac", "-ar", "44100", "-b:a", "48k", "-ac", "2",
-        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
-        "-hls_flags", "independent_segments",
-        "-hls_segment_filename", str(out_dir / "v1" / "seg_%05d.ts"),
-        str(out_dir / "v1" / "playlist.m3u8"),
+        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
+        "-hls_segment_filename", str(out_dir / "v1" / "seg_%05d.ts"), str(out_dir / "v1" / "playlist.m3u8"),
+
         "-map", "[v360]", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main",
-        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96",
-        "-force_key_frames", "expr:gte(t,n_forced*4)",
+        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
         "-s:v", "640x360", "-b:v", "450k", "-maxrate", "550k", "-bufsize", "900k",
         "-c:a", "aac", "-ar", "44100", "-b:a", "64k", "-ac", "2",
-        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
-        "-hls_flags", "independent_segments",
-        "-hls_segment_filename", str(out_dir / "v2" / "seg_%05d.ts"),
-        str(out_dir / "v2" / "playlist.m3u8"),
+        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
+        "-hls_segment_filename", str(out_dir / "v2" / "seg_%05d.ts"), str(out_dir / "v2" / "playlist.m3u8"),
     ]
 
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
+        *cmd, stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
     feeder = asyncio.create_task(_write_telegram_to_pipe(file, proc.stdin))
     try:
@@ -127,7 +115,6 @@ async def _run_ffmpeg(file: dict, out_dir: Path):
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", "ignore")[-6000:]
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {detail}")
-
     _write_master(out_dir)
 
 
