@@ -1,0 +1,39 @@
+name: Restore QuantXDrive App and add video fallback
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore known-good App.jsx and add fallback
+        shell: bash
+        run: |
+          git checkout 9e0ee672478474aa20576d38f6e23b463c9bbd00 -- frontend/src/App.jsx
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('frontend/src/App.jsx')
+          s = p.read_text()
+          old = '<AdaptiveVideo src={hlsUrl} autoPlay style={{ width: "100%", maxHeight: "78vh" }} />'
+          new = '<AdaptiveVideo src={hlsUrl} fallbackSrc={url} autoPlay style={{ width: "100%", maxHeight: "78vh" }} />'
+          if old not in s:
+              raise SystemExit('Expected HLS preview line not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/src/App.jsx
+          if git diff --cached --quiet; then
+            echo "No changes needed"
+          else
+            git commit -m "fix: restore frontend and add direct video fallback"
+            git push
+          fi
