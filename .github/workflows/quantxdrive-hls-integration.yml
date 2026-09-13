@@ -1,0 +1,58 @@
+name: QuantXDrive HLS integration
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-frontend:
+    if: ${{ !contains(github.event.head_commit.message, 'chore: wire adaptive HLS player') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wire adaptive player into existing UI
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('frontend/src/App.jsx')
+          s = p.read_text()
+          marker = '// QUANTX HLS INTEGRATION'
+          if marker in s:
+              print('Already integrated')
+              raise SystemExit(0)
+
+          import_line = 'import AdaptiveVideo from "./AdaptiveVideo";'
+          first = 'import { useState, useEffect, useCallback, useRef, useMemo } from "react";'
+          if import_line not in s:
+              s = s.replace(first, first + '\n' + import_line, 1)
+
+          old = '<video src={url} controls autoPlay playsInline style={{ width: "100%", maxHeight: "78vh", background: "#000" }} />'
+          new = '<AdaptiveVideo src={hlsUrl} autoPlay style={{ width: "100%", maxHeight: "78vh" }} />'
+          if old not in s:
+              raise SystemExit('Preview video element was not found')
+          s = s.replace(old, new, 1)
+
+          needle = 'const kind = getKind(file); const url = `${API}/api/media/${token}/${file.id}`;'
+          replacement = needle + '\n  const hlsUrl = `${API}/api/hls/${token}/${file.id}/master.m3u8`;'
+          if needle not in s:
+              raise SystemExit('Preview URL declaration was not found')
+          s = s.replace(needle, replacement, 1)
+
+          s = marker + '\n' + s
+          p.write_text(s)
+          PY
+
+      - name: Commit frontend integration
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/src/App.jsx
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: wire adaptive HLS player"
+          git push
