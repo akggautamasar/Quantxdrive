@@ -1,4 +1,6 @@
+// QUANTX HLS INTEGRATION
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import AdaptiveVideo from "./AdaptiveVideo";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -670,6 +672,7 @@ function ActionMenu({ file, token, folders, onClose, onFolderChange, onDelete })
 // ── Preview Modal ─────────────────────────────────────────────────────────────
 function Preview({ file, token, onClose }) {
   const kind = getKind(file); const url = `${API}/api/media/${token}/${file.id}`;
+  const hlsUrl = `${API}/api/hls/${token}/${file.id}/master.m3u8`;
   useEffect(() => {
     const h = e => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
@@ -678,7 +681,7 @@ function Preview({ file, token, onClose }) {
 
   const inner = () => {
     if (kind === "image") return <img src={url} alt={file.filename} style={{ maxWidth: "100%", maxHeight: "78vh", objectFit: "contain" }} />;
-    if (kind === "video") return <video src={url} controls autoPlay playsInline style={{ width: "100%", maxHeight: "78vh", background: "#000" }} />;
+    if (kind === "video") return <AdaptiveVideo src={hlsUrl} autoPlay style={{ width: "100%", maxHeight: "78vh" }} />;
     if (kind === "pdf" || kind === "text") return <iframe src={url} style={{ width: "100%", height: "78vh", border: "none", background: "white" }} title={file.filename} />;
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 48, background: "white", width: "100%" }}>
