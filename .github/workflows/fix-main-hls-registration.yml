@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '.github/workflows/fix-main-hls-registration.yml'
+      - 'backend/main.py'
 
 jobs:
   fix:
@@ -23,12 +24,11 @@ jobs:
 
           p = Path('backend/main.py')
           s = p.read_text()
-          marker = '\n# ── QuantXDrive HLS routes ───────────────────────────────────────────────────\n'
           if 'from hls_service import register_hls_routes' in s:
               print('HLS routes already registered in main.py')
               raise SystemExit(0)
 
-          addition = '''\n# ── QuantXDrive HLS routes ───────────────────────────────────────────────────\n# Render starts `uvicorn main:app`, so HLS must be registered on this app object.\n# Importing here (after all main.py definitions) avoids the circular-import issue\n# because hls_service imports main for the Telegram streaming helpers.\nfrom hls_service import register_hls_routes\nregister_hls_routes(app)\nprint("✅ HLS routes registered on main:app", flush=True)\n'''
+          addition = '''\n# ── QuantXDrive HLS routes ───────────────────────────────────────────────────\n# Render starts `uvicorn main:app`, so HLS must be registered on this app object.\n# Importing here after all main.py definitions avoids the circular-import issue.\nfrom hls_service import register_hls_routes\nregister_hls_routes(app)\nprint("✅ HLS routes registered on main:app", flush=True)\n'''
           p.write_text(s.rstrip() + addition + '\n')
           PY
 
