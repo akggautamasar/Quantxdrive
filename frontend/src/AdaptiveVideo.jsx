@@ -34,11 +34,16 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
     const video = videoRef.current;
     if (!video || !src) return undefined;
     let cancelled = false;
-    const cleanup = () => {
+
+    const destroyHls = () => {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+    };
+
+    const cleanup = () => {
+      destroyHls();
       video.removeAttribute("src");
       video.load();
     };
@@ -46,10 +51,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
     const useFallback = () => {
       if (cancelled || !fallbackSrc || fallbackUsedRef.current) return false;
       fallbackUsedRef.current = true;
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
+      destroyHls();
       setLevels([]);
       setLevel(-1);
       setError("");
@@ -70,12 +72,14 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         if (autoPlay) video.play().catch(() => {});
         return;
       }
+
       try {
         const Hls = await loadHls();
         if (cancelled || !Hls || !Hls.isSupported()) {
           if (!useFallback()) setError("This browser cannot play the video.");
           return;
         }
+
         const hls = new Hls({
           enableWorker: true,
           capLevelToPlayerSize: true,
@@ -87,28 +91,38 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
           abrBandWidthUpFactor: 0.65,
           startLevel: -1,
           autoStartLoad: true,
-          fragLoadingMaxRetry: 3,
-          manifestLoadingMaxRetry: 2,
-          levelLoadingMaxRetry: 2,
+          fragLoadingMaxRetry: 2,
+          manifestLoadingMaxRetry: 1,
+          levelLoadingMaxRetry: 1,
         });
         hlsRef.current = hls;
+
         hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
           if (cancelled) return;
           setLevels(data.levels || []);
           if (autoPlay) video.play().catch(() => {});
         });
+
         hls.on(Hls.Events.ERROR, (_, data) => {
-          if (!data?.fatal) return;
+          if (cancelled || !data?.fatal) return;
+
+          // A missing/failed master playlist is not recoverable by repeatedly
+          // retrying. Immediately switch to the proven Range-based media URL.
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            if (!hlsRef.current || hlsRef.current !== hls) return;
-            hls.startLoad();
+            useFallback();
+            if (!fallbackSrc) setError("Video stream could not be loaded. Please retry.");
           } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            hls.recoverMediaError();
+            try {
+              hls.recoverMediaError();
+            } catch {
+              useFallback();
+            }
           } else {
             useFallback();
             if (!fallbackSrc) setError("Video stream could not be loaded. Please retry.");
           }
         });
+
         hls.loadSource(src);
         hls.attachMedia(video);
       } catch {
@@ -131,7 +145,12 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
 
   return (
     <div style={{ position: "relative", width: "100%", background: "#000", borderRadius: 10, overflow: "hidden" }}>
-      <video ref={videoRef} controls playsInline preload="metadata" className={className}
+      <video
+        ref={videoRef}
+        controls
+        playsInline
+        preload="metadata"
+        className={className}
         onError={() => {
           if (!fallbackUsedRef.current && fallbackSrc) {
             const video = videoRef.current;
@@ -139,16 +158,23 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
               fallbackUsedRef.current = true;
               if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
               setLevels([]);
+              setLevel(-1);
               video.src = fallbackSrc;
               video.load();
               if (autoPlay) video.play().catch(() => {});
             }
           }
         }}
-        style={{ width: "100%", display: "block", background: "#000", ...style }} {...props} />
+        style={{ width: "100%", display: "block", background: "#000", ...style }}
+        {...props}
+      />
       {levels.length > 0 && (
-        <select value={level} onChange={chooseLevel} aria-label="Video quality"
-          style={{ position: "absolute", right: 10, bottom: 42, zIndex: 5, background: "rgba(0,0,0,.75)", color: "white", border: "1px solid rgba(255,255,255,.2)", borderRadius: 6, padding: "4px 7px", fontSize: 11 }}>
+        <select
+          value={level}
+          onChange={chooseLevel}
+          aria-label="Video quality"
+          style={{ position: "absolute", right: 10, bottom: 42, zIndex: 5, background: "rgba(0,0,0,.75)", color: "white", border: "1px solid rgba(255,255,255,.2)", borderRadius: 6, padding: "4px 7px", fontSize: 11 }}
+        >
           <option value={-1}>Auto</option>
           {levels.map((l, i) => <option key={`${l.height}-${i}`} value={i}>{l.height ? `${l.height}p` : `${Math.round((l.bitrate || 0) / 1000)} kbps`}</option>)}
         </select>
