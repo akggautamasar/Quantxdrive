@@ -22,9 +22,10 @@ function loadHls() {
   return window.__quantxHlsPromise;
 }
 
-export default function AdaptiveVideo({ src, autoPlay = false, style, className, ...props }) {
+export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, style, className, ...props }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
+  const fallbackUsedRef = useRef(false);
   const [levels, setLevels] = useState([]);
   const [level, setLevel] = useState(-1);
   const [error, setError] = useState("");
@@ -42,6 +43,23 @@ export default function AdaptiveVideo({ src, autoPlay = false, style, className,
       video.load();
     };
 
+    const useFallback = () => {
+      if (cancelled || !fallbackSrc || fallbackUsedRef.current) return false;
+      fallbackUsedRef.current = true;
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      setLevels([]);
+      setLevel(-1);
+      setError("");
+      video.src = fallbackSrc;
+      video.load();
+      if (autoPlay) video.play().catch(() => {});
+      return true;
+    };
+
+    fallbackUsedRef.current = false;
     setError("");
     setLevels([]);
     setLevel(-1);
@@ -55,7 +73,7 @@ export default function AdaptiveVideo({ src, autoPlay = false, style, className,
       try {
         const Hls = await loadHls();
         if (cancelled || !Hls || !Hls.isSupported()) {
-          setError("This browser cannot play adaptive HLS video.");
+          if (!useFallback()) setError("This browser cannot play the video.");
           return;
         }
         const hls = new Hls({
@@ -69,9 +87,9 @@ export default function AdaptiveVideo({ src, autoPlay = false, style, className,
           abrBandWidthUpFactor: 0.65,
           startLevel: -1,
           autoStartLoad: true,
-          fragLoadingMaxRetry: 5,
-          manifestLoadingMaxRetry: 5,
-          levelLoadingMaxRetry: 5,
+          fragLoadingMaxRetry: 3,
+          manifestLoadingMaxRetry: 2,
+          levelLoadingMaxRetry: 2,
         });
         hlsRef.current = hls;
         hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
@@ -81,22 +99,29 @@ export default function AdaptiveVideo({ src, autoPlay = false, style, className,
         });
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data?.fatal) return;
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-          else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-          else setError("Video stream could not be loaded. Please retry.");
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            if (!hlsRef.current || hlsRef.current !== hls) return;
+            hls.startLoad();
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+          } else {
+            useFallback();
+            if (!fallbackSrc) setError("Video stream could not be loaded. Please retry.");
+          }
         });
         hls.loadSource(src);
         hls.attachMedia(video);
       } catch {
-        if (!cancelled) setError("Unable to load the adaptive video player.");
+        if (!cancelled && !useFallback()) setError("Unable to load the video.");
       }
     };
+
     start();
     return () => {
       cancelled = true;
       cleanup();
     };
-  }, [src, autoPlay]);
+  }, [src, fallbackSrc, autoPlay]);
 
   const chooseLevel = e => {
     const next = Number(e.target.value);
@@ -107,6 +132,19 @@ export default function AdaptiveVideo({ src, autoPlay = false, style, className,
   return (
     <div style={{ position: "relative", width: "100%", background: "#000", borderRadius: 10, overflow: "hidden" }}>
       <video ref={videoRef} controls playsInline preload="metadata" className={className}
+        onError={() => {
+          if (!fallbackUsedRef.current && fallbackSrc) {
+            const video = videoRef.current;
+            if (video) {
+              fallbackUsedRef.current = true;
+              if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+              setLevels([]);
+              video.src = fallbackSrc;
+              video.load();
+              if (autoPlay) video.play().catch(() => {});
+            }
+          }
+        }}
         style={{ width: "100%", display: "block", background: "#000", ...style }} {...props} />
       {levels.length > 0 && (
         <select value={level} onChange={chooseLevel} aria-label="Video quality"
