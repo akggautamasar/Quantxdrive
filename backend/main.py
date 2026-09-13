@@ -545,3 +545,10 @@ async def get_file_link(file_db_id: int, _: bool = Depends(verify_token)):
 
     tg_url = make_tg_link(file["channel_id"], file["message_id"])
     return {"type": "telegram", "url": tg_url, "filename": file["filename"]}
+# ── QuantXDrive HLS routes ───────────────────────────────────────────────────
+# Render starts `uvicorn main:app`, so HLS must be registered on this app object.
+# Importing here after all main.py definitions avoids the circular-import issue.
+from hls_service import register_hls_routes
+register_hls_routes(app)
+print("✅ HLS routes registered on main:app", flush=True)
+
