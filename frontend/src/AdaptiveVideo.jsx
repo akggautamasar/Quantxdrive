@@ -51,7 +51,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
       if (hls) {
         try {
           hls.loadSource(nextSrc);
-          hls.startLoad();
+          hls.startLoad(0);
           const restore = () => {
             if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
             if (wasPlaying || autoPlay) video.play().catch(() => {});
@@ -141,8 +141,12 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
           hlsStartedRef.current = false;
         });
 
-        hls.loadSource(src);
         hls.attachMedia(video);
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+          if (cancelled || hlsRef.current !== hls) return;
+          hls.loadSource(src);
+          hls.startLoad(0);
+        });
         return;
       }
 
