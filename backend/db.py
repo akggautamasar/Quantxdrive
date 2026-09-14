@@ -4,17 +4,19 @@ from typing import Optional
 _raw_idx = os.getenv("INDEX_CHANNEL_ID", "me")
 INDEX_CHANNEL_ID = int(_raw_idx) if _raw_idx.lstrip("-").isdigit() else _raw_idx
 
-_index: dict = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+_index: dict = {"files": [], "next_id": 1, "folders": [], "shares": {}, "channels": []}
 _index_msg_id: Optional[int] = None
+
 
 def _ensure_keys():
     _index.setdefault("files", [])
     _index.setdefault("next_id", 1)
     _index.setdefault("folders", [])
     _index.setdefault("shares", {})
+    _index.setdefault("channels", [])
+
 
 async def _load_index_from(client, chat_id):
-    """Try to load index.json from the given chat_id. Returns True on success."""
     global _index, _index_msg_id
     chat = await client.get_chat(chat_id)
     label = getattr(chat, "title", None) or getattr(chat, "first_name", str(chat_id))
@@ -32,12 +34,12 @@ async def _load_index_from(client, chat_id):
         print(f"✅ Loaded index msg {_index_msg_id}: {len(_index.get('files',[]))} files")
     else:
         print("⚠️  No index.json found, starting fresh")
-        _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+        _index = {"files": [], "next_id": 1, "folders": [], "shares": {}, "channels": []}
     return True
+
 
 async def load_index(client):
     global _index, _index_msg_id, INDEX_CHANNEL_ID
-    # Try configured channel first; if it fails, fall back to "me" (Saved Messages)
     try:
         await _load_index_from(client, INDEX_CHANNEL_ID)
     except Exception as e:
@@ -49,19 +51,27 @@ async def load_index(client):
                 await _load_index_from(client, "me")
             except Exception as e2:
                 print(f"❌ Fallback also failed: {e2}")
-                _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+                _index = {"files": [], "next_id": 1, "folders": [], "shares": {}, "channels": []}
         else:
-            _index = {"files": [], "next_id": 1, "folders": [], "shares": {}}
+            _index = {"files": [], "next_id": 1, "folders": [], "shares": {}, "channels": []}
     _ensure_keys()
+    try:
+        import main
+        from channels_service import register_routes
+        register_routes(main.app)
+        print(f"📺 Channel routes ready ({len(_index.get('channels', []))} configured)")
+    except Exception as e:
+        print(f"⚠️  Channel routes could not be registered: {e}")
+
 
 def cleanup_expired_shares():
-    """Remove expired share tokens to keep index.json small."""
     now = int(time.time())
     expired = [k for k, v in _index.get("shares", {}).items() if v.get("expires_at", 0) < now]
     for k in expired:
         del _index["shares"][k]
     if expired:
         print(f"✅ Purged {len(expired)} expired shares")
+
 
 async def save_index(client):
     global _index_msg_id
@@ -83,10 +93,7 @@ async def save_index(client):
             except Exception as e:
                 print(f"⚠️  Edit failed: {e}, sending new")
         bio.seek(0)
-        new_msg = await client.send_document(
-            chat_id=INDEX_CHANNEL_ID, document=bio,
-            file_name="index.json", caption="AirDrive Index",
-        )
+        new_msg = await client.send_document(chat_id=INDEX_CHANNEL_ID, document=bio, file_name="index.json", caption="AirDrive Index")
         old_id = _index_msg_id
         _index_msg_id = new_msg.id
         if old_id and old_id != new_msg.id:
@@ -95,6 +102,7 @@ async def save_index(client):
         print(f"✅ Index saved new msg {_index_msg_id}")
     except Exception as e:
         print(f"❌ Save failed: {e}")
+
 
 async def upsert_file(data: dict):
     msg_id = data.get("message_id")
@@ -106,12 +114,10 @@ async def upsert_file(data: dict):
     _index["files"].append({"id": _index["next_id"], **data})
     _index["next_id"] += 1
 
-# ── Filtering & sorting ──────────────────────────────────────────────────────
 
 async def get_files_filtered(category=None, q=None, folder=None, favorites=False,
                              sort_by="date", sort_dir="desc", limit=50, offset=0):
     files = _index["files"]
-
     if favorites:
         files = [f for f in files if f.get("favorite")]
     if folder is not None:
@@ -124,7 +130,6 @@ async def get_files_filtered(category=None, q=None, folder=None, favorites=False
     if q:
         ql = q.lower()
         files = [f for f in files if ql in f.get("filename","").lower() or ql in f.get("caption","").lower()]
-
     reverse = (sort_dir == "desc")
     if sort_by == "name":
         files = sorted(files, key=lambda f: f.get("filename","").lower(), reverse=reverse)
@@ -132,14 +137,15 @@ async def get_files_filtered(category=None, q=None, folder=None, favorites=False
         files = sorted(files, key=lambda f: f.get("size", 0), reverse=reverse)
     else:
         files = sorted(files, key=lambda f: f.get("date",""), reverse=reverse)
-
     return files[offset:offset+limit], len(files)
+
 
 async def get_file_by_id(file_id: int):
     for f in _index["files"]:
         if f.get("id") == file_id:
             return f
     return None
+
 
 async def get_stats():
     files = _index["files"]
@@ -159,7 +165,6 @@ async def get_stats():
         "folders_count": len(_index.get("folders", [])),
     }
 
-# ── Favorites ─────────────────────────────────────────────────────────────────
 
 async def toggle_favorite(file_id: int):
     for f in _index["files"]:
@@ -168,7 +173,6 @@ async def toggle_favorite(file_id: int):
             return f["favorite"]
     return False
 
-# ── Folders ───────────────────────────────────────────────────────────────────
 
 async def create_folder(name: str):
     fid = uuid.uuid4().hex[:10]
@@ -176,12 +180,13 @@ async def create_folder(name: str):
     _index.setdefault("folders", []).append(folder)
     return folder
 
+
 async def delete_folder(folder_id: str):
     _index["folders"] = [f for f in _index.get("folders", []) if f["id"] != folder_id]
-    # Remove folder_id from all files
     for f in _index["files"]:
         if f.get("folder_id") == folder_id:
             f["folder_id"] = None
+
 
 async def move_file_to_folder(file_id: int, folder_id):
     for f in _index["files"]:
@@ -189,12 +194,12 @@ async def move_file_to_folder(file_id: int, folder_id):
             f["folder_id"] = folder_id
             return
 
-# ── Shares ────────────────────────────────────────────────────────────────────
 
 async def add_share(token: str, file_id: int, expires_at: int, password_hash: str = ""):
     _index.setdefault("shares", {})[token] = {
         "file_id": file_id, "expires_at": expires_at, "password_hash": password_hash,
     }
+
 
 async def get_share(token: str):
     share = _index.get("shares", {}).get(token)
