@@ -28,13 +28,7 @@ async def _lock_for(file_id: int):
 
 
 async def _download_source(file: dict, destination: Path):
-    """Download the complete Telegram object before handing it to FFmpeg.
-
-    MP4/MOV containers are particularly sensitive to truncated pipes because
-    FFmpeg may need the container metadata at EOF. The normal media endpoint
-    remains range-streaming; HLS preparation deliberately uses a complete
-    local source and verifies its size when the database has one.
-    """
+    """Download the complete Telegram object before handing it to FFmpeg."""
     expected = int(file.get("size") or 0)
     tmp = destination.with_suffix(destination.suffix + ".part")
     tmp.unlink(missing_ok=True)
@@ -78,7 +72,6 @@ async def _run_ffmpeg(source: Path, out_dir: Path):
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", str(source),
         "-filter_complex", "[0:v:0]split=3[v144][v240][v360]",
-
         "-map", "[v144]", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
         "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
@@ -86,7 +79,6 @@ async def _run_ffmpeg(source: Path, out_dir: Path):
         "-c:a", "aac", "-ar", "44100", "-b:a", "32k", "-ac", "2",
         "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
         "-hls_segment_filename", str(out_dir / "v0" / "seg_%05d.ts"), str(out_dir / "v0" / "playlist.m3u8"),
-
         "-map", "[v240]", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
         "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
@@ -94,7 +86,6 @@ async def _run_ffmpeg(source: Path, out_dir: Path):
         "-c:a", "aac", "-ar", "44100", "-b:a", "48k", "-ac", "2",
         "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
         "-hls_segment_filename", str(out_dir / "v1" / "seg_%05d.ts"), str(out_dir / "v1" / "playlist.m3u8"),
-
         "-map", "[v360]", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
         "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
@@ -137,9 +128,8 @@ async def prepare_hls(file_id: int):
         tmp_dir = HLS_ROOT / f".{file_id}.building"
         shutil.rmtree(tmp_dir, ignore_errors=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        source = tmp_dir / "source" + Path(file.get("filename") or "video.mp4").suffix
-        # Ensure the expression above always produces a Path even for unusual names.
-        source = tmp_dir / ("source" + Path(file.get("filename") or "video.mp4").suffix)
+        suffix = Path(file.get("filename") or "video.mp4").suffix.lower() or ".mp4"
+        source = tmp_dir / ("source" + suffix)
         try:
             for attempt in range(1, 3):
                 try:
