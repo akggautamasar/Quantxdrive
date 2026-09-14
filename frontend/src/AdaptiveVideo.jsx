@@ -64,9 +64,28 @@ export default function AdaptiveVideo({
     const targetIndex = QUALITY_OPTIONS.findIndex(q => q.id === selectedQuality);
     const target = targetIndex >= 0 ? targetIndex : 0;
 
+    const startNativeHls = () => {
+      if (cancelled || !video.canPlayType("application/vnd.apple.mpegurl")) return false;
+      const variantUrl = src.replace(/\/master\.m3u8$/, `/${selectedQuality}/playlist.m3u8`);
+      video.src = variantUrl;
+      video.load();
+      const onMetadata = () => {
+        if (cancelled) return;
+        setPreparing(false);
+        setError("");
+        if (autoPlay) video.play().catch(() => {});
+      };
+      video.addEventListener("loadedmetadata", onMetadata, { once: true });
+      return true;
+    };
+
     const startHls = count => {
       if (cancelled || hlsRef.current || count <= target) return;
       lastCount = count;
+      if (!Hls.isSupported()) {
+        startNativeHls();
+        return;
+      }
       setPreparing(true);
       setError("");
 
@@ -135,8 +154,6 @@ export default function AdaptiveVideo({
       const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       const wasPlaying = !video.paused;
       try {
-        hls.loadSource(`${src}?q=${count}`);
-        hls.startLoad(0);
         hls.once(Hls.Events.MANIFEST_PARSED, (_, data) => {
           if (cancelled) return;
           const nextLevels = data.levels || [];
@@ -149,6 +166,8 @@ export default function AdaptiveVideo({
             if (wasPlaying || autoPlay) video.play().catch(() => {});
           }
         });
+        hls.loadSource(`${src}?q=${count}`);
+        hls.startLoad(0);
       } catch {}
     };
 
