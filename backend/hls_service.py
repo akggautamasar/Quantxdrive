@@ -13,6 +13,7 @@ PREPARE_LOCKS = {}
 PREPARE_TASKS = {}
 PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
+HLS_TRANSCODE_SEMAPHORE = asyncio.Semaphore(1)
 MAX_HLS_SOURCE_BYTES = int(os.getenv("HLS_MAX_SOURCE_BYTES", str(2 * 1024 * 1024 * 1024)))
 
 
@@ -163,7 +164,8 @@ async def prepare_hls(file_id: int):
             for attempt in range(1, 3):
                 try:
                     await _download_source(file, source)
-                    await _run_ffmpeg(source, tmp_dir)
+                    async with HLS_TRANSCODE_SEMAPHORE:
+                        await _run_ffmpeg(source, tmp_dir)
                     source.unlink(missing_ok=True)
                     shutil.rmtree(out_dir, ignore_errors=True)
                     tmp_dir.rename(out_dir)
