@@ -13,8 +13,9 @@ services:
       install -m 0755 "$(find /tmp -type f -path '*/bin/ffmpeg' -print -quit)" /usr/local/bin/ffmpeg
       install -m 0755 "$(find /tmp -type f -path '*/bin/ffprobe' -print -quit)" /usr/local/bin/ffprobe
       ffmpeg -version
+      ffmpeg -hide_banner -h protocol=http | grep -E 'request_size|initial_request_size|short_seek_size'
       pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: API_ID
         sync: false
