@@ -16,15 +16,19 @@ PREPARE_TASKS = {}
 PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
 HLS_JOB_SEMAPHORE = asyncio.Semaphore(1)
-MAX_HLS_SOURCE_BYTES = int(os.getenv("HLS_MAX_SOURCE_BYTES", str(2 * 1024 * 1024 * 1024)))
 
-# The streaming prototype deliberately avoids downloading the complete Telegram
-# source. FFmpeg reads this local HTTP endpoint as a seekable resource and asks
-# for only the byte ranges it needs. The secret is process-local and the route
-# additionally accepts requests only from loopback.
+# FFmpeg is deliberately given a seekable HTTP view of Telegram rather than a
+# pipe or a local copy of the complete source. This lets the MP4/MOV demuxer
+# request tail metadata and other byte ranges as needed.
 HLS_PROXY_SECRET = os.getenv("HLS_PROXY_SECRET") or secrets.token_urlsafe(32)
 HLS_PROXY_PORT = int(os.getenv("PORT", "8000"))
 TG_CHUNK_SIZE = 1024 * 1024
+
+VARIANTS = [
+    ("v0", "256x144", "96k", "120k", "200k", "24k"),
+    ("v1", "426x240", "180k", "220k", "360k", "32k"),
+    ("v2", "640x360", "400k", "480k", "720k", "48k"),
+]
 
 
 def _dir(file_id: int) -> Path:
@@ -54,7 +58,7 @@ def _task_done(file_id: int, task: asyncio.Task):
 
 
 async def _start_prepare(file_id: int):
-    """Start preparation without blocking the video request."""
+    """Start HLS preparation without blocking the direct media request."""
     async with PREPARE_LOCKS_GUARD:
         if _master_path(file_id).exists():
             PREPARE_FAILED.discard(file_id)
@@ -70,111 +74,137 @@ async def _start_prepare(file_id: int):
         return False
 
 
-async def _download_source(file: dict, destination: Path):
-    """Legacy full-download fallback for sources the proxy/FFmpeg path cannot parse."""
-    expected = int(file.get("size") or 0)
-    tmp = destination.with_suffix(destination.suffix + ".part")
-    tmp.unlink(missing_ok=True)
-    written = 0
-    try:
-        with tmp.open("wb") as fh:
-            async for chunk in main._stream_media_with_refresh(file):
-                if chunk:
-                    fh.write(chunk)
-                    written += len(chunk)
-        if expected and written != expected:
-            raise RuntimeError(f"Telegram download incomplete: received {written} bytes, expected {expected}")
-        tmp.replace(destination)
-        print(f"✅ HLS source downloaded (fallback): file {file.get('id')} ({written} bytes)", flush=True)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-VARIANTS = [
-    ("v0", "256x144", "96k", "120k", "200k", "24k"),
-    ("v1", "426x240", "180k", "220k", "360k", "32k"),
-    ("v2", "640x360", "400k", "480k", "720k", "48k"),
-]
-
-
-VARIANTS = [
-    ("v0", "256x144", "96k", "120k", "200k", "24k"),
-    ("v1", "426x240", "180k", "220k", "360k", "32k"),
-    ("v2", "640x360", "400k", "480k", "720k", "48k"),
-]
-
 def _write_master(out_dir: Path, names):
-    specs={name:(resolution,maxrate) for name,resolution,_,maxrate,_,_ in VARIANTS}
-    lines=["#EXTM3U","#EXT-X-VERSION:3"]
+    specs = {name: (resolution, maxrate) for name, resolution, _, maxrate, _, _ in VARIANTS}
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
     for name in names:
-        resolution,bandwidth=specs[name]
-        lines += [f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={resolution}",f"{name}/playlist.m3u8"]
-    tmp=out_dir/"master.m3u8.tmp"
-    tmp.write_text("\n".join(lines)+"\n",encoding="utf-8")
-    tmp.replace(out_dir/"master.m3u8")
+        resolution, bandwidth = specs[name]
+        lines += [
+            f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={resolution}",
+            f"{name}/playlist.m3u8",
+        ]
+    tmp = out_dir / "master.m3u8.tmp"
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(out_dir / "master.m3u8")
 
-async def _encode_variant(source: Path, out_dir: Path, variant, live=False):
-    name,resolution,video_bitrate,maxrate,bufsize,audio_bitrate=variant
-    variant_dir=out_dir/name
-    variant_dir.mkdir(parents=True,exist_ok=True)
-    playlist=variant_dir/"playlist.m3u8"
-    segment_pattern=variant_dir/"seg_%05d.ts"
-    cmd=["ffmpeg","-hide_banner","-loglevel","error","-threads","1","-filter_threads","1","-filter_complex_threads","1","-i",str(source),"-map","0:v:0","-map","0:a:0?","-c:v","libx264","-preset","ultrafast","-profile:v","main","-pix_fmt","yuv420p","-sc_threshold","0","-r","24","-g","48","-keyint_min","48","-force_key_frames","expr:gte(t,n_forced*2)","-s:v",resolution,"-b:v",video_bitrate,"-maxrate",maxrate,"-bufsize",bufsize,"-c:a","aac","-ar","44100","-b:a",audio_bitrate,"-ac","2","-f","hls","-hls_time","2","-hls_list_size","0","-hls_flags","independent_segments","-hls_segment_filename",str(segment_pattern),"-hls_playlist_type","event" if live else "vod",str(playlist)]
-    print(f"🎞️ HLS encoding {name} for source {source.name}",flush=True)
-    proc=await asyncio.create_subprocess_exec(*cmd,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)
+
+async def _encode_variant(source_url: str, source_label: str, out_dir: Path, variant, live=False):
+    name, resolution, video_bitrate, maxrate, bufsize, audio_bitrate = variant
+    variant_dir = out_dir / name
+    variant_dir.mkdir(parents=True, exist_ok=True)
+    playlist = variant_dir / "playlist.m3u8"
+    segment_pattern = variant_dir / "seg_%05d.ts"
+
+    # Explicitly advertise a seekable HTTP input. FFmpeg's HTTP demuxer can then
+    # issue Range requests for MP4/MOV metadata and media instead of reading the
+    # entire Telegram object through an unseekable stdin pipe.
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+        "-seekable", "1",
+        "-request_size", str(4 * 1024 * 1024),
+        "-initial_request_size", str(2 * 1024 * 1024),
+        "-multiple_requests", "1",
+        "-i", source_url,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "ultrafast", "-profile:v", "main",
+        "-pix_fmt", "yuv420p", "-sc_threshold", "0", "-r", "24",
+        "-g", "48", "-keyint_min", "48",
+        "-force_key_frames", "expr:gte(t,n_forced*2)",
+        "-s:v", resolution, "-b:v", video_bitrate,
+        "-maxrate", maxrate, "-bufsize", bufsize,
+        "-c:a", "aac", "-ar", "44100", "-b:a", audio_bitrate, "-ac", "2",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", "0",
+        "-hls_flags", "independent_segments",
+        "-hls_segment_filename", str(segment_pattern),
+        "-hls_playlist_type", "event" if live else "vod",
+        str(playlist),
+    ]
+
+    print(f"🎞️ HLS encoding {name} from seekable Telegram HTTP source {source_label}", flush=True)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    )
+
     if live:
-        for _ in range(120):
+        for _ in range(240):
             if playlist.exists() and list(variant_dir.glob("seg_*.ts")):
-                print(f"⚡ HLS first segment ready for {name}",flush=True)
-                return proc,playlist
-            if proc.returncode is not None: break
+                print(f"⚡ HLS first segment ready for {name}", flush=True)
+                return proc, playlist
+            if proc.returncode is not None:
+                break
             await asyncio.sleep(0.25)
-    _,stderr=await proc.communicate()
-    if proc.returncode!=0: raise RuntimeError(f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8','ignore')[-6000:]}")
-    if not playlist.exists(): raise RuntimeError(f"ffmpeg {name} produced no playlist")
-    return None,playlist
+
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg {name} failed ({proc.returncode}): "
+            f"{stderr.decode('utf-8', 'ignore')[-10000:]}"
+        )
+    if not playlist.exists():
+        raise RuntimeError(f"ffmpeg {name} produced no playlist")
+    return None, playlist
+
 
 async def prepare_hls(file_id: int):
-    file=await main.db.get_file_by_id(file_id)
-    if not file: raise HTTPException(status_code=404,detail="File not found")
-    mime=file.get("mime") or main.get_mime(file.get("filename",""))
-    if not mime.startswith("video/"): raise HTTPException(status_code=400,detail="HLS is available only for videos")
-    size=int(file.get("size") or 0)
-    if size and size>MAX_HLS_SOURCE_BYTES: raise HTTPException(status_code=413,detail="Video is too large for on-demand HLS preparation")
-    master=_master_path(file_id)
-    if master.exists(): return file
-    lock=await _lock_for(file_id)
+    file = await main.db.get_file_by_id(file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+    mime = file.get("mime") or main.get_mime(file.get("filename", ""))
+    if not mime.startswith("video/"):
+        raise HTTPException(status_code=400, detail="HLS is available only for videos")
+
+    master = _master_path(file_id)
+    if master.exists():
+        return file
+
+    lock = await _lock_for(file_id)
     async with lock:
-        if master.exists(): return file
+        if master.exists():
+            return file
         async with HLS_JOB_SEMAPHORE:
-            out_dir=_dir(file_id); tmp_dir=HLS_ROOT/f".{file_id}.building"
-            shutil.rmtree(tmp_dir,ignore_errors=True); shutil.rmtree(out_dir,ignore_errors=True); tmp_dir.mkdir(parents=True,exist_ok=True)
-            suffix=Path(file.get("filename") or "video.mp4").suffix.lower() or ".mp4"
-            source=tmp_dir/("source"+suffix)
+            out_dir = _dir(file_id)
+            shutil.rmtree(out_dir, ignore_errors=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # The endpoint is reachable only from loopback and requires the
+            # process-local secret. FFmpeg therefore never exposes the Telegram
+            # file through a public unauthenticated URL.
+            source_url = (
+                f"http://127.0.0.1:{HLS_PROXY_PORT}/internal/hls-source/"
+                f"{file_id}?key={HLS_PROXY_SECRET}"
+            )
+
             try:
-                await _download_source(file,source)
-                out_dir.mkdir(parents=True,exist_ok=True)
-                proc0,_=await _encode_variant(source,out_dir,VARIANTS[0],live=True)
-                _write_master(out_dir,["v0"])
-                print(f"⚡ HLS low-bandwidth stream ready for file {file_id}",flush=True)
+                proc0, _ = await _encode_variant(
+                    source_url, str(file_id), out_dir, VARIANTS[0], live=True
+                )
+                _write_master(out_dir, ["v0"])
+                print(f"⚡ HLS low-bandwidth stream ready for file {file_id}", flush=True)
+
                 if proc0:
-                    _,err=await proc0.communicate()
-                    if proc0.returncode!=0: raise RuntimeError(f"ffmpeg v0 failed ({proc0.returncode}): {err.decode('utf-8','ignore')[-6000:]}")
-                await _encode_variant(source,out_dir,VARIANTS[1],live=False)
-                _write_master(out_dir,["v0","v1"])
-                print(f"⚡ HLS 240p available for file {file_id}",flush=True)
-                await _encode_variant(source,out_dir,VARIANTS[2],live=False)
-                _write_master(out_dir,["v0","v1","v2"])
-                print(f"⚡ HLS 360p available for file {file_id}",flush=True)
-                source.unlink(missing_ok=True); shutil.rmtree(tmp_dir,ignore_errors=True)
-                print(f"✅ HLS ready for file {file_id}",flush=True)
+                    _, err = await proc0.communicate()
+                    if proc0.returncode != 0:
+                        raise RuntimeError(
+                            f"ffmpeg v0 failed ({proc0.returncode}): "
+                            f"{err.decode('utf-8', 'ignore')[-10000:]}"
+                        )
+
+                await _encode_variant(source_url, str(file_id), out_dir, VARIANTS[1], live=False)
+                _write_master(out_dir, ["v0", "v1"])
+                print(f"⚡ HLS 240p available for file {file_id}", flush=True)
+
+                await _encode_variant(source_url, str(file_id), out_dir, VARIANTS[2], live=False)
+                _write_master(out_dir, ["v0", "v1", "v2"])
+                print(f"⚡ HLS 360p available for file {file_id}", flush=True)
+
+                print(f"✅ HLS ready for file {file_id}", flush=True)
                 return file
             except Exception:
-                source.unlink(missing_ok=True); shutil.rmtree(tmp_dir,ignore_errors=True)
-                if not master.exists(): shutil.rmtree(out_dir,ignore_errors=True)
+                if not master.exists():
+                    shutil.rmtree(out_dir, ignore_errors=True)
                 raise
-    return file
+
 
 def _hls_response(path: Path, media_type: str) -> Response:
     body = path.read_bytes()
@@ -195,7 +225,7 @@ def _parse_single_range(range_header: str, size: int):
     value = range_header[6:].strip()
     if not value or "," in value:
         raise HTTPException(status_code=416, detail="Only a single byte range is supported")
-    left, sep, right = value.partition("-")
+    left, _, right = value.partition("-")
     try:
         if not left:
             suffix = int(right)
@@ -210,8 +240,7 @@ def _parse_single_range(range_header: str, size: int):
         raise HTTPException(status_code=416, detail="Invalid byte range")
     if start < 0 or start >= size or end < start:
         raise HTTPException(status_code=416, detail="Range not satisfiable")
-    end = min(end, size - 1)
-    return start, end
+    return start, min(end, size - 1)
 
 
 async def _proxy_range_response(file: dict, request: Request, head_only: bool = False):
@@ -236,8 +265,6 @@ async def _proxy_range_response(file: dict, request: Request, head_only: bool = 
     if head_only:
         return Response(status_code=206 if parsed else 200, headers=headers, media_type=mime)
 
-    # Pyrogram stream_media() works in 1 MiB chunks. Align the Telegram read to
-    # those chunks and trim only the first/last chunk to the exact HTTP range.
     chunk_offset = start // TG_CHUNK_SIZE
     first_cut = start - (chunk_offset * TG_CHUNK_SIZE)
     last_cut = (end % TG_CHUNK_SIZE) + 1
@@ -274,9 +301,10 @@ async def _proxy_range_response(file: dict, request: Request, head_only: bool = 
 def register_hls_routes(app):
     @app.api_route("/internal/hls-source/{file_id}", methods=["GET", "HEAD"])
     async def hls_source_proxy(file_id: int, request: Request, key: str = ""):
-        """Loopback-only seekable HTTP view of a Telegram media file for FFmpeg."""
         client_host = request.client.host if request.client else ""
-        if client_host not in {"127.0.0.1", "::1", "localhost"} or not secrets.compare_digest(key, HLS_PROXY_SECRET):
+        if client_host not in {"127.0.0.1", "::1", "localhost"}:
+            raise HTTPException(status_code=404, detail="Not found")
+        if not secrets.compare_digest(key, HLS_PROXY_SECRET):
             raise HTTPException(status_code=404, detail="Not found")
         file = await main.db.get_file_by_id(file_id)
         if not file:
@@ -315,15 +343,27 @@ def register_hls_routes(app):
 
     @app.get("/api/hls/{token}/{file_id}/status")
     async def hls_status(token: str, file_id: int):
-        if not main.verify_jwt(token): raise HTTPException(status_code=401,detail="Invalid token")
-        file=await main.db.get_file_by_id(file_id)
-        if not file: raise HTTPException(status_code=404,detail="File not found")
-        master=_master_path(file_id)
+        if not main.verify_jwt(token):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        file = await main.db.get_file_by_id(file_id)
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        master = _master_path(file_id)
         if not master.exists() and file_id not in PREPARE_FAILED:
-            task=PREPARE_TASKS.get(file_id)
-            if not task or task.done(): await _start_prepare(file_id)
-        task=PREPARE_TASKS.get(file_id)
-        available=[name for name,*_ in VARIANTS if (_dir(file_id)/name/"playlist.m3u8").exists()]
-        ready=master.exists()
-        if ready: PREPARE_FAILED.discard(file_id)
-        return {"ready":ready,"preparing":bool(task and not task.done()),"failed":file_id in PREPARE_FAILED and not ready,"qualities":available}
+            task = PREPARE_TASKS.get(file_id)
+            if not task or task.done():
+                await _start_prepare(file_id)
+        task = PREPARE_TASKS.get(file_id)
+        available = [
+            name for name, *_ in VARIANTS
+            if (_dir(file_id) / name / "playlist.m3u8").exists()
+        ]
+        ready = master.exists()
+        if ready:
+            PREPARE_FAILED.discard(file_id)
+        return {
+            "ready": ready,
+            "preparing": bool(task and not task.done()),
+            "failed": file_id in PREPARE_FAILED and not ready,
+            "qualities": available,
+        }
