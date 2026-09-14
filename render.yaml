@@ -9,14 +9,19 @@ services:
       set -eux
       apt-get update
       apt-get install -y curl xz-utils ca-certificates
-      curl -L --fail --silent --show-error https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-09-14-51/ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0.tar.xz -o /tmp/ffmpeg.tar.xz
-      tar -xJf /tmp/ffmpeg.tar.xz -C /tmp
-      install -m 0755 "$(find /tmp -type f -path '*/bin/ffmpeg' -print -quit)" /usr/local/bin/ffmpeg
-      install -m 0755 "$(find /tmp -type f -path '*/bin/ffprobe' -print -quit)" /usr/local/bin/ffprobe
-      ffmpeg -version
-      ffmpeg -hide_banner -h protocol=http | grep -E 'request_size|initial_request_size|short_seek_size'
+      rm -rf .render-ffmpeg .render-ffmpeg-tmp
+      mkdir -p .render-ffmpeg .render-ffmpeg-tmp
+      curl -L --fail --silent --show-error https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-09-14-51/ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0.tar.xz -o .render-ffmpeg-tmp/ffmpeg.tar.xz
+      tar -xJf .render-ffmpeg-tmp/ffmpeg.tar.xz -C .render-ffmpeg-tmp
+      install -m 0755 "$(find .render-ffmpeg-tmp -type f -path '*/bin/ffmpeg' -print -quit)" .render-ffmpeg/ffmpeg
+      install -m 0755 "$(find .render-ffmpeg-tmp -type f -path '*/bin/ffprobe' -print -quit)" .render-ffmpeg/ffprobe
+      .render-ffmpeg/ffmpeg -version
+      .render-ffmpeg/ffmpeg -hide_banner -h protocol=http 2>&1 | grep -q request_size
+      .render-ffmpeg/ffmpeg -hide_banner -h protocol=http 2>&1 | grep -q initial_request_size
+      .render-ffmpeg/ffmpeg -hide_banner -h protocol=http 2>&1 | grep -q short_seek_size
+      rm -rf .render-ffmpeg-tmp
       pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: PATH="$PWD/.render-ffmpeg:$PATH" uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: API_ID
         sync: false
