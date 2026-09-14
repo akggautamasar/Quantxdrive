@@ -7,8 +7,8 @@ services:
     rootDir: backend
     buildCommand: |
       set -eux
-      bash ./ensure_render_ffmpeg.sh
       pip install -r requirements.txt
+      bash ./ensure_render_ffmpeg.sh
     startCommand: |
       set -e
       bash ./ensure_render_ffmpeg.sh
