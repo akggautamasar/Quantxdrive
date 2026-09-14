@@ -14,8 +14,10 @@ fi
 mkdir -p "$FFMPEG_DIR" .render-ffmpeg-tmp
 trap 'rm -rf .render-ffmpeg-tmp' EXIT
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "Installing curl for Render FFmpeg bootstrap..."
+# Render Python images normally include curl, but verify both curl and xz so
+# the bootstrap works even when the base image changes.
+if ! command -v curl >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
+  echo "Installing FFmpeg bootstrap dependencies..."
   apt-get update
   apt-get install -y curl xz-utils ca-certificates
 fi
