@@ -1,45 +1,7 @@
 name: Slow Network HLS Instant Start
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
-
-jobs:
-  migrate:
-    if: github.event.head_commit.message != 'Apply slow-network HLS instant-start migration'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Patch HLS backend
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-          p=Path('backend/hls_service.py')
-          s=p.read_text()
-          s=s.replace('HLS_TRANSCODE_SEMAPHORE = asyncio.Semaphore(1)','HLS_JOB_SEMAPHORE = asyncio.Semaphore(1)')
-          a=s.index('def _write_master('); b=s.index('async def prepare_hls(',a)
-          helpers='''VARIANTS = [\n    ("v0", "256x144", "96k", "120k", "200k", "24k"),\n    ("v1", "426x240", "180k", "220k", "360k", "32k"),\n    ("v2", "640x360", "400k", "480k", "720k", "48k"),\n]\n\ndef _write_master(out_dir: Path, names):\n    specs={name:(resolution,maxrate) for name,resolution,_,maxrate,_,_ in VARIANTS}\n    lines=["#EXTM3U","#EXT-X-VERSION:3"]\n    for name in names:\n        resolution,bandwidth=specs[name]\n        lines += [f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={resolution}",f"{name}/playlist.m3u8"]\n    tmp=out_dir/"master.m3u8.tmp"\n    tmp.write_text("\\n".join(lines)+"\\n",encoding="utf-8")\n    tmp.replace(out_dir/"master.m3u8")\n\nasync def _encode_variant(source: Path, out_dir: Path, variant, live=False):\n    name,resolution,video_bitrate,maxrate,bufsize,audio_bitrate=variant\n    variant_dir=out_dir/name\n    variant_dir.mkdir(parents=True,exist_ok=True)\n    playlist=variant_dir/"playlist.m3u8"\n    segment_pattern=variant_dir/"seg_%05d.ts"\n    cmd=["ffmpeg","-hide_banner","-loglevel","error","-threads","1","-filter_threads","1","-filter_complex_threads","1","-i",str(source),"-map","0:v:0","-map","0:a:0?","-c:v","libx264","-preset","ultrafast","-profile:v","main","-pix_fmt","yuv420p","-sc_threshold","0","-r","24","-g","48","-keyint_min","48","-force_key_frames","expr:gte(t,n_forced*2)","-s:v",resolution,"-b:v",video_bitrate,"-maxrate",maxrate,"-bufsize",bufsize,"-c:a","aac","-ar","44100","-b:a",audio_bitrate,"-ac","2","-f","hls","-hls_time","2","-hls_list_size","0","-hls_flags","independent_segments","-hls_segment_filename",str(segment_pattern),"-hls_playlist_type","event" if live else "vod",str(playlist)]\n    print(f"🎞️ HLS encoding {name} for source {source.name}",flush=True)\n    proc=await asyncio.create_subprocess_exec(*cmd,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)\n    if live:\n        for _ in range(120):\n            if playlist.exists() and list(variant_dir.glob("seg_*.ts")):\n                print(f"⚡ HLS first segment ready for {name}",flush=True)\n                return proc,playlist\n            if proc.returncode is not None: break\n            await asyncio.sleep(0.25)\n    _,stderr=await proc.communicate()\n    if proc.returncode!=0: raise RuntimeError(f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8','ignore')[-6000:]}")\n    if not playlist.exists(): raise RuntimeError(f"ffmpeg {name} produced no playlist")\n    return None,playlist\n\n'''
-          s=s[:a]+helpers+s[b:]
-          a=s.index('async def prepare_hls('); b=s.index('def _hls_response(',a)
-          prepare='''async def prepare_hls(file_id: int):\n    file=await main.db.get_file_by_id(file_id)\n    if not file: raise HTTPException(status_code=404,detail="File not found")\n    mime=file.get("mime") or main.get_mime(file.get("filename",""))\n    if not mime.startswith("video/"): raise HTTPException(status_code=400,detail="HLS is available only for videos")\n    size=int(file.get("size") or 0)\n    if size and size>MAX_HLS_SOURCE_BYTES: raise HTTPException(status_code=413,detail="Video is too large for on-demand HLS preparation")\n    master=_master_path(file_id)\n    if master.exists(): return file\n    lock=await _lock_for(file_id)\n    async with lock:\n        if master.exists(): return file\n        async with HLS_JOB_SEMAPHORE:\n            out_dir=_dir(file_id); tmp_dir=HLS_ROOT/f".{file_id}.building"\n            shutil.rmtree(tmp_dir,ignore_errors=True); shutil.rmtree(out_dir,ignore_errors=True); tmp_dir.mkdir(parents=True,exist_ok=True)\n            suffix=Path(file.get("filename") or "video.mp4").suffix.lower() or ".mp4"\n            source=tmp_dir/("source"+suffix)\n            try:\n                await _download_source(file,source)\n                out_dir.mkdir(parents=True,exist_ok=True)\n                proc0,_=await _encode_variant(source,out_dir,VARIANTS[0],live=True)\n                _write_master(out_dir,["v0"])\n                print(f"⚡ HLS low-bandwidth stream ready for file {file_id}",flush=True)\n                if proc0:\n                    _,err=await proc0.communicate()\n                    if proc0.returncode!=0: raise RuntimeError(f"ffmpeg v0 failed ({proc0.returncode}): {err.decode('utf-8','ignore')[-6000:]}")\n                await _encode_variant(source,out_dir,VARIANTS[1],live=False)\n                _write_master(out_dir,["v0","v1"])\n                print(f"⚡ HLS 240p available for file {file_id}",flush=True)\n                await _encode_variant(source,out_dir,VARIANTS[2],live=False)\n                _write_master(out_dir,["v0","v1","v2"])\n                print(f"⚡ HLS 360p available for file {file_id}",flush=True)\n                source.unlink(missing_ok=True); shutil.rmtree(tmp_dir,ignore_errors=True)\n                print(f"✅ HLS ready for file {file_id}",flush=True)\n                return file\n            except Exception:\n                source.unlink(missing_ok=True); shutil.rmtree(tmp_dir,ignore_errors=True)\n                if not master.exists(): shutil.rmtree(out_dir,ignore_errors=True)\n                raise\n    return file\n\n'''
-          s=s[:a]+prepare+s[b:]
-          s=s.replace('"Cache-Control": "public, max-age=3600",','"Cache-Control": "no-cache, no-store, must-revalidate",')
-          a=s.index('    @app.get("/api/hls/{token}/{file_id}/status")')
-          status='''    @app.get("/api/hls/{token}/{file_id}/status")\n    async def hls_status(token: str, file_id: int):\n        if not main.verify_jwt(token): raise HTTPException(status_code=401,detail="Invalid token")\n        file=await main.db.get_file_by_id(file_id)\n        if not file: raise HTTPException(status_code=404,detail="File not found")\n        master=_master_path(file_id)\n        if not master.exists() and file_id not in PREPARE_FAILED:\n            task=PREPARE_TASKS.get(file_id)\n            if not task or task.done(): await _start_prepare(file_id)\n        task=PREPARE_TASKS.get(file_id)\n        available=[name for name,*_ in VARIANTS if (_dir(file_id)/name/"playlist.m3u8").exists()]\n        ready=master.exists()\n        if ready: PREPARE_FAILED.discard(file_id)\n        return {"ready":ready,"preparing":bool(task and not task.done()),"failed":file_id in PREPARE_FAILED and not ready,"qualities":available}\n'''
-          s=s[:a]+status
-          p.write_text(s)
-          PY
-      - name: Validate backend
-        run: python3 -m py_compile backend/hls_service.py
-      - name: Commit migration
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/hls_service.py
-          git diff --cached --check
-          git commit -m "Apply slow-network HLS instant-start migration" || exit 0
-          git push
+# One-time HLS migration is complete. Kept as a manual workflow placeholder;
+# it must not rewrite backend/hls_service.py on normal pushes.
