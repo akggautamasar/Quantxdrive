@@ -47,7 +47,8 @@ async def _ffmpeg_supports_range_options(binary: str) -> bool:
         )
         output, _ = await proc.communicate()
         text = output.decode("utf-8", "ignore")
-        return proc.returncode == 0 and "request_size" in text and "initial_request_size" in text
+        required = ("request_size", "initial_request_size", "short_seek_size")
+        return proc.returncode == 0 and all(option in text for option in required)
     except Exception:
         return False
 
@@ -193,7 +194,6 @@ async def _encode_variant(source_url: str, source_label: str, out_dir: Path, var
         ffmpeg, "-hide_banner", "-loglevel", "warning",
         "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
         "-seekable", "1",
-        "-prefer_libcurl", "1",
         "-multiple_requests", "1",
         "-request_size", "4194304",
         "-initial_request_size", "2097152",
