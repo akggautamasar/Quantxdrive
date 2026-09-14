@@ -11,6 +11,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
   const pollRef = useRef(null);
   const hlsStartedRef = useRef(false);
   const qualityCountRef = useRef(0);
+  const playbackReadyRef = useRef(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -31,11 +32,19 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
       }
     };
 
+    const markPlaybackReady = () => {
+      if (cancelled) return;
+      playbackReadyRef.current = true;
+      setPreparing(false);
+      setError("");
+    };
+
     const directPlay = () => {
       if (cancelled) return;
       destroyHls();
       hlsStartedRef.current = false;
       qualityCountRef.current = 0;
+      playbackReadyRef.current = false;
       video.src = fallbackSrc;
       video.load();
       if (autoPlay) video.play().catch(() => {});
@@ -74,6 +83,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
       if (cancelled || hlsStartedRef.current || !src) return;
       hlsStartedRef.current = true;
       qualityCountRef.current = Math.max(1, initialCount || 1);
+      playbackReadyRef.current = false;
       setPreparing(true);
       setError("");
       const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
@@ -127,7 +137,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
           console.warn("QuantXDrive HLS error", data.type, data.details, data.fatal);
           if (!data.fatal) return;
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            setPreparing(true);
+            if (!playbackReadyRef.current) setPreparing(true);
             try { hls.startLoad(); } catch {}
             return;
           }
@@ -176,13 +186,15 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
           const d = await r.json();
           const count = Array.isArray(d.qualities) ? d.qualities.length : 0;
           const ready = !!d.ready || count > 0;
-          setPreparing(!!d.preparing && count < 3);
+          if (!playbackReadyRef.current) {
+            setPreparing(!!d.preparing && count < 3);
+          }
           if (!hlsStartedRef.current && ready) {
             await startHls(count || 1);
           } else if (hlsStartedRef.current && count > qualityCountRef.current) {
             reloadHlsManifest(count);
           }
-          if (d.failed && !d.ready) {
+          if (d.failed && !d.ready && !playbackReadyRef.current) {
             setPreparing(false);
             setError("Preparing the video stream…");
           }
@@ -191,8 +203,12 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
       if (!cancelled) pollRef.current = setTimeout(pollStatus, 1500);
     };
 
+    const playbackEvents = ["loadeddata", "canplay", "playing"];
+    playbackEvents.forEach(event => video.addEventListener(event, markPlaybackReady));
+
     hlsStartedRef.current = false;
     qualityCountRef.current = 0;
+    playbackReadyRef.current = false;
     setLevels([]);
     setLevel(-1);
     setPreparing(true);
@@ -205,6 +221,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
     return () => {
       cancelled = true;
       stopPoll();
+      playbackEvents.forEach(event => video.removeEventListener(event, markPlaybackReady));
       destroyHls();
       video.removeAttribute("src");
       video.load();
@@ -236,7 +253,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         <option value={-1}>Auto</option>
         {levels.map((l, i) => <option key={`${l.height}-${i}`} value={i}>{l.height ? `${l.height}p` : `${Math.round((l.bitrate || 0) / 1000)} kbps`}</option>)}
       </select>}
-      {error && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, color: "white", background: "rgba(0,0,0,.72)", textAlign: "center", fontSize: 12, fontWeight: 700 }}>{error}</div>}
+      {error && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, color: "white", background: "rgba(0,0,0,.72)", textAlign: "center", fontSize: 12, fontWeight: 700, pointerEvents: "none" }}>{error}</div>}
     </div>
   );
 }
