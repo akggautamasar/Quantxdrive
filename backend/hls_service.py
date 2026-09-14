@@ -368,12 +368,15 @@ def register_hls_routes(app):
         if not file:
             raise HTTPException(status_code=404, detail="File not found")
         supported = [x[0] for x in _supported_variants(file)]
-        if "v0" in supported:
-            await _start_variant(file_id, "v0")
+        # A quality-specific request is the user's playback request: start that
+        # encoder first. Do not spend the single Render CPU slot generating 144p
+        # while the user is waiting for 240p/360p/etc.
         if quality:
             if quality not in supported:
                 raise HTTPException(status_code=400, detail="Requested quality is higher than the source video")
             await _start_variant(file_id, quality)
+        elif "v0" in supported:
+            await _start_variant(file_id, "v0")
         available = [x[0] for x in _available_variants(file_id) if x[0] in supported]
         task_keys = [_task_key(file_id, q) for q in supported]
         preparing = any(k in PREPARE_TASKS and not PREPARE_TASKS[k].done() for k in task_keys)
