@@ -7,11 +7,11 @@ services:
     rootDir: backend
     buildCommand: |
       set -eux
-      ./ensure_render_ffmpeg.sh
+      bash ./ensure_render_ffmpeg.sh
       pip install -r requirements.txt
     startCommand: |
       set -e
-      ./ensure_render_ffmpeg.sh
+      bash ./ensure_render_ffmpeg.sh
       export FFMPEG_BINARY="$PWD/.render-ffmpeg/ffmpeg"
       export PATH="$PWD/.render-ffmpeg:$PATH"
       exec uvicorn main:app --host 0.0.0.0 --port $PORT
