@@ -2,6 +2,9 @@ import asyncio
 import os
 import shutil
 import secrets
+import subprocess
+import tarfile
+import urllib.request
 from pathlib import Path
 
 from fastapi import HTTPException, Request
@@ -15,6 +18,8 @@ PREPARE_LOCKS = {}
 PREPARE_TASKS = {}
 PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
+FFMPEG_LOCK = asyncio.Lock()
+FFMPEG_PATH = None
 
 HLS_V0_SEMAPHORE = asyncio.Semaphore(2)
 HLS_UPGRADE_SEMAPHORE = asyncio.Semaphore(1)
@@ -23,11 +28,76 @@ HLS_PROXY_SECRET = os.getenv("HLS_PROXY_SECRET") or secrets.token_urlsafe(32)
 HLS_PROXY_PORT = int(os.getenv("PORT", "8000"))
 TG_CHUNK_SIZE = 1024 * 1024
 
+FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-09-14-51/ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0.tar.xz"
+FFMPEG_DIR = Path("/tmp/quantxdrive-ffmpeg")
+FFMPEG_BINARY = FFMPEG_DIR / "ffmpeg"
+
 VARIANTS = [
     ("v0", "256x144", "96k", "120k", "200k", "24k"),
     ("v1", "426x240", "180k", "220k", "360k", "32k"),
     ("v2", "640x360", "400k", "480k", "720k", "48k"),
 ]
+
+async def _ffmpeg_supports_range_options(binary: str) -> bool:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary, "-hide_banner", "-h", "protocol=http",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await proc.communicate()
+        text = output.decode("utf-8", "ignore")
+        return proc.returncode == 0 and "request_size" in text and "initial_request_size" in text
+    except Exception:
+        return False
+
+async def _ensure_ffmpeg() -> str:
+    global FFMPEG_PATH
+    if FFMPEG_PATH:
+        return FFMPEG_PATH
+    async with FFMPEG_LOCK:
+        if FFMPEG_PATH:
+            return FFMPEG_PATH
+        system_ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        if await _ffmpeg_supports_range_options(system_ffmpeg):
+            FFMPEG_PATH = system_ffmpeg
+            print(f"🎬 Using system FFmpeg: {FFMPEG_PATH}", flush=True)
+            return FFMPEG_PATH
+        if FFMPEG_BINARY.exists() and await _ffmpeg_supports_range_options(str(FFMPEG_BINARY)):
+            FFMPEG_PATH = str(FFMPEG_BINARY)
+            print(f"🎬 Using cached modern FFmpeg: {FFMPEG_PATH}", flush=True)
+            return FFMPEG_PATH
+        print("⬇️ System FFmpeg lacks bounded HTTP range options; downloading modern FFmpeg", flush=True)
+        tmp_archive = Path("/tmp/quantxdrive-ffmpeg.tar.xz")
+        tmp_download = Path("/tmp/quantxdrive-ffmpeg.download")
+        FFMPEG_DIR.mkdir(parents=True, exist_ok=True)
+        def download():
+            with urllib.request.urlopen(FFMPEG_URL, timeout=120) as src, tmp_download.open("wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+        await asyncio.to_thread(download)
+        tmp_archive.unlink(missing_ok=True)
+        tmp_download.replace(tmp_archive)
+        extract_root = Path("/tmp/quantxdrive-ffmpeg-extract")
+        shutil.rmtree(extract_root, ignore_errors=True)
+        extract_root.mkdir(parents=True, exist_ok=True)
+        def extract():
+            with tarfile.open(tmp_archive, "r:xz") as archive:
+                member = next((m for m in archive.getmembers() if m.name.endswith("/bin/ffmpeg")), None)
+                if not member:
+                    raise RuntimeError("Modern FFmpeg archive did not contain bin/ffmpeg")
+                archive.extract(member, extract_root)
+        await asyncio.to_thread(extract)
+        extracted = next(extract_root.rglob("ffmpeg"), None)
+        if not extracted or not extracted.is_file():
+            raise RuntimeError("Modern FFmpeg binary was not extracted")
+        shutil.copy2(extracted, FFMPEG_BINARY)
+        FFMPEG_BINARY.chmod(0o755)
+        tmp_archive.unlink(missing_ok=True)
+        shutil.rmtree(extract_root, ignore_errors=True)
+        if not await _ffmpeg_supports_range_options(str(FFMPEG_BINARY)):
+            raise RuntimeError("Downloaded FFmpeg does not support bounded HTTP range options")
+        FFMPEG_PATH = str(FFMPEG_BINARY)
+        print(f"✅ Modern FFmpeg ready: {FFMPEG_PATH}", flush=True)
+        return FFMPEG_PATH
 
 def _dir(file_id: int) -> Path:
     return HLS_ROOT / str(file_id)
@@ -85,8 +155,9 @@ async def _encode_variant(source_url: str, source_label: str, out_dir: Path, var
     variant_dir.mkdir(parents=True, exist_ok=True)
     playlist = variant_dir / "playlist.m3u8"
     segment_pattern = variant_dir / "seg_%05d.ts"
+    ffmpeg = await _ensure_ffmpeg()
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        ffmpeg, "-hide_banner", "-loglevel", "warning",
         "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
         "-seekable", "1",
         "-multiple_requests", "1",
