@@ -4,20 +4,29 @@ services:
     env: python
     plan: free
     healthCheckPath: /
-    buildCommand: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+    buildCommand: |
+      set -eux
+      apt-get update
+      apt-get install -y curl xz-utils ca-certificates
+      curl -L --fail --silent --show-error https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-09-14-51/ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0.tar.xz -o /tmp/ffmpeg.tar.xz
+      tar -xJf /tmp/ffmpeg.tar.xz -C /tmp
+      install -m 0755 "$(find /tmp -type f -path '*/bin/ffmpeg' -print -quit)" /usr/local/bin/ffmpeg
+      install -m 0755 "$(find /tmp -type f -path '*/bin/ffprobe' -print -quit)" /usr/local/bin/ffprobe
+      ffmpeg -version
+      pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: API_ID
-        value: 26182818
+        sync: false
       - key: API_HASH
-        value: e98cc55fabed0fce53269188fa3a0e63
+        sync: false
       - key: JWT_SECRET
         generateValue: true
       - key: APP_PASSWORD
-        value: Airlocked@6279
+        sync: false
       - key: SESSION_STRING
-        value: PASTE_YOUR_SESSION_STRING_HERE
+        sync: false
       - key: BOT_TOKEN
-        value: PASTE_YOUR_BOT_TOKEN_HERE
+        sync: false
       - key: INDEX_CHANNEL_ID
         value: "me"
