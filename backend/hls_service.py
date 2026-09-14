@@ -201,7 +201,16 @@ def register_hls_routes(app):
         if not main.verify_jwt(token):
             raise HTTPException(status_code=401, detail="Invalid token")
         master = _master_path(file_id)
+        if master.exists():
+            return {"ready": True, "preparing": False, "failed": False}
+
+        # Status polling must also bootstrap preparation. After a Render restart
+        # PREPARE_TASKS is empty, so waiting for the master alone would deadlock.
         task = PREPARE_TASKS.get(file_id)
+        if not task or task.done():
+            await _start_prepare(file_id)
+            task = PREPARE_TASKS.get(file_id)
+
         return {
             "ready": master.exists(),
             "preparing": bool(task and not task.done()),
