@@ -1,10 +1,15 @@
+import os
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends, Request
+from fastapi.responses import StreamingResponse
+from pyrogram import Client
 
 import db
+
+_bot_client = None
 
 
 def _kind(message):
@@ -43,8 +48,44 @@ def _channel_config(channel_id: int):
     return None
 
 
+async def _get_bot_client():
+    global _bot_client
+    import main
+    if not main.BOT_TOKEN:
+        return None
+    if _bot_client and _bot_client.is_connected:
+        return _bot_client
+    _bot_client = Client(
+        "quantxdrive_channel_bot",
+        api_id=main.API_ID,
+        api_hash=main.API_HASH,
+        bot_token=main.BOT_TOKEN,
+        in_memory=True,
+    )
+    await _bot_client.start()
+    print("🤖 Channel bot client started", flush=True)
+    return _bot_client
+
+
+async def _resolve_with_clients(target):
+    import main
+    errors = []
+    clients = [(main.pyro_client, "session")]
+    bot = await _get_bot_client()
+    if bot:
+        clients.append((bot, "bot"))
+    for client, mode in clients:
+        if not client: continue
+        try:
+            chat = await client.get_chat(target)
+            return chat, client, mode
+        except Exception as exc:
+            errors.append(f"{mode}: {exc}")
+    detail = "Telegram could not access this channel. " + " | ".join(errors)
+    raise HTTPException(status_code=400, detail=detail)
+
+
 def _normalize_target(raw: str):
-    """Accept numeric IDs, @usernames and public t.me/telegram.me URLs."""
     value = str(raw or "").strip()
     if not value: return None
     if value.lstrip("-").isdigit(): return int(value)
@@ -65,63 +106,117 @@ def _normalize_target(raw: str):
 
 
 async def _resolve_channel(raw: str):
-    import main
     target = _normalize_target(raw)
     if target is None:
         raise HTTPException(status_code=400, detail="Enter a Telegram channel ID, @username, or public t.me/username link")
-    if not main.pyro_client:
-        raise HTTPException(status_code=503, detail="Telegram client is not ready")
-    try:
-        chat = await main.pyro_client.get_chat(target)
-    except Exception as exc:
-        if "PEER_ID_INVALID" in str(exc).upper() and isinstance(target, int):
-            raise HTTPException(status_code=400, detail=(
-                "Telegram could not resolve this numeric channel ID for the connected SESSION_STRING. "
-                "For a public channel, enter its @username (or https://t.me/username) instead. "
-                "Also make sure the Telegram account represented by SESSION_STRING has access; "
-                "adding a separate BOT_TOKEN bot does not grant access to the SESSION_STRING account."
-            ))
-        raise HTTPException(status_code=400, detail=f"Telegram account cannot access this channel: {exc}")
-    if not getattr(chat, "id", None):
-        raise HTTPException(status_code=400, detail="Telegram did not return a valid channel ID")
-    return chat, target
+    chat, client, mode = await _resolve_with_clients(target)
+    return chat, target, client, mode
 
 
 async def _sync_channel(channel_id: int, limit: int = 0):
     import main
-    if not main.pyro_client:
-        raise HTTPException(status_code=503, detail="Telegram client is not ready")
     cfg = _channel_config(channel_id)
     target = ("@" + cfg.get("username")) if cfg and cfg.get("username") else channel_id
-    try:
-        chat = await main.pyro_client.get_chat(target)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Cannot access channel: {exc}")
+    chat, client, mode = await _resolve_with_clients(target)
     count = scanned = 0
-    async for message in main.pyro_client.get_chat_history(chat.id, limit=limit or 0):
+    async for message in client.get_chat_history(chat.id, limit=limit or 0):
         scanned += 1
         info = _media_info(message)
         if info:
+            info["channel_access"] = mode
             await db.upsert_file(info)
             count += 1
     cfg = cfg or {"id": channel_id}
     cfg.update({
         "title": getattr(chat, "title", None) or getattr(chat, "first_name", None) or str(channel_id),
-        "username": getattr(chat, "username", None) or "", "type": str(getattr(chat, "type", "channel")),
-        "last_sync": datetime.utcnow().isoformat(), "scanned": scanned, "files": count,
+        "username": getattr(chat, "username", None) or "",
+        "type": str(getattr(chat, "type", "channel")),
+        "access_client": mode,
+        "last_sync": datetime.utcnow().isoformat(),
+        "scanned": scanned,
+        "files": count,
     })
-    if not _channel_config(channel_id): db._index.setdefault("channels", []).append(cfg)
+    if not _channel_config(channel_id):
+        db._index.setdefault("channels", []).append(cfg)
     else:
         for i, old in enumerate(db._index["channels"]):
-            if int(old.get("id")) == int(channel_id): db._index["channels"][i] = cfg; break
+            if int(old.get("id")) == int(channel_id):
+                db._index["channels"][i] = cfg
+                break
     await db.save_index(main.pyro_client)
     return cfg
+
+
+async def _stream_channel_file(file: dict, request: Request):
+    import main
+    mode = file.get("channel_access") or (_channel_config(int(file.get("channel_id", 0))) or {}).get("access_client") or "session"
+    if mode == "bot":
+        client = await _get_bot_client()
+    else:
+        client = main.pyro_client
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client is not ready")
+    try:
+        message = await client.get_messages(int(file["channel_id"]), int(file["message_id"]))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Telegram message unavailable: {exc}")
+    if not message or not _kind(message):
+        raise HTTPException(status_code=404, detail="Telegram media message not found")
+
+    total = int(file.get("size", 0) or 0)
+    mime = file.get("mime") or db.get_mime(file.get("filename", "file"))
+    rh = request.headers.get("range") or request.headers.get("Range")
+    start, end = 0, total - 1 if total else 0
+    partial = False
+    if rh and rh.startswith("bytes=") and total:
+        try:
+            spec = rh[6:].split(",", 1)[0]
+            a, b = spec.split("-", 1)
+            if a:
+                start = int(a)
+                end = int(b) if b else total - 1
+            else:
+                length = int(b)
+                start = max(0, total - length)
+                end = total - 1
+            start = max(0, min(start, total - 1))
+            end = max(start, min(end, total - 1))
+            partial = True
+        except Exception:
+            start, end, partial = 0, total - 1, False
+
+    chunk_size = 1024 * 1024
+    offset = start // chunk_size
+    first_cut = start % chunk_size
+    count = ((end // chunk_size) - offset) + 1 if total else 0
+
+    async def gen():
+        current = 0
+        async for chunk in client.stream_media(message, offset=offset, limit=count or 0):
+            if not chunk: continue
+            if count == 1:
+                yield chunk[first_cut:(end % chunk_size) + 1]
+            elif current == 0:
+                yield chunk[first_cut:]
+            elif current == count - 1:
+                yield chunk[:(end % chunk_size) + 1]
+            else:
+                yield chunk
+            current += 1
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f'inline; filename="{file.get("filename", "telegram-file")}"',
+        "Cache-Control": "public, max-age=3600",
+    }
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(gen(), status_code=206 if partial else 200, media_type=mime, headers=headers)
 
 
 def register_routes(app):
     if getattr(app.state, "channels_routes_registered", False): return
     app.state.channels_routes_registered = True
-    from fastapi import Depends
     import main
 
     @app.get("/api/channels")
@@ -132,21 +227,27 @@ def register_routes(app):
     async def add_channel(body: dict, _: bool = Depends(main.verify_token)):
         raw_target = str(body.get("channel_id", "")).strip()
         name = str(body.get("name") or "").strip()
-        chat, target = await _resolve_channel(raw_target)
+        chat, target, _, mode = await _resolve_channel(raw_target)
         channel_id = int(chat.id)
         existing = _channel_config(channel_id)
         cfg = existing or {"id": channel_id}
         cfg.update({
             "title": name or getattr(chat, "title", None) or getattr(chat, "first_name", None) or str(channel_id),
-            "username": getattr(chat, "username", None) or "", "type": str(getattr(chat, "type", "channel")),
-            "input": raw_target, "resolved_from": str(target),
+            "username": getattr(chat, "username", None) or "",
+            "type": str(getattr(chat, "type", "channel")),
+            "input": raw_target,
+            "resolved_from": str(target),
+            "access_client": mode,
             "added_at": existing.get("added_at") if existing else datetime.utcnow().isoformat(),
             "last_sync": existing.get("last_sync") if existing else None,
         })
         if existing:
             for i, old in enumerate(db._index["channels"]):
-                if int(old.get("id")) == channel_id: db._index["channels"][i] = cfg; break
-        else: db._index.setdefault("channels", []).append(cfg)
+                if int(old.get("id")) == channel_id:
+                    db._index["channels"][i] = cfg
+                    break
+        else:
+            db._index.setdefault("channels", []).append(cfg)
         await db.save_index(main.pyro_client)
         return {"channel": cfg, "connected": True}
 
@@ -170,12 +271,22 @@ def register_routes(app):
             wanted = "photos" if type == "photo" else "videos" if type == "video" else "audio" if type == "audio" else "other_files"
             files = [f for f in files if f.get("category") == wanted]
         if q:
-            ql = q.lower(); files = [f for f in files if ql in str(f.get("filename", "")).lower() or ql in str(f.get("caption", "")).lower()]
+            ql = q.lower()
+            files = [f for f in files if ql in str(f.get("filename", "")).lower() or ql in str(f.get("caption", "")).lower()]
         reverse = sort_dir != "asc"
         if sort_by == "name": files.sort(key=lambda f: str(f.get("filename", "")).lower(), reverse=reverse)
         elif sort_by == "size": files.sort(key=lambda f: int(f.get("size", 0) or 0), reverse=reverse)
         else: files.sort(key=lambda f: str(f.get("date", "")), reverse=reverse)
-        total = len(files); limit = max(1, min(limit, 100)); page = max(1, page); offset = (page - 1) * limit
-        out = files[offset:offset + limit]
-        out = [{**f, "tg_link": main.make_tg_link(channel_id, f.get("message_id", 0))} for f in out]
+        total = len(files)
+        limit = max(1, min(limit, 100)); page = max(1, page); offset = (page - 1) * limit
+        out = [{**f, "tg_link": main.make_tg_link(channel_id, f.get("message_id", 0))} for f in files[offset:offset + limit]]
         return {"channel": configured, "files": out, "total": total, "page": page, "pages": max(1, (total + limit - 1) // limit)}
+
+    @app.get("/api/channel-media/{token}/{file_db_id}")
+    async def channel_media(token: str, file_db_id: int, request: Request):
+        if not main.verify_jwt(token):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        file = await db.get_file_by_id(file_db_id)
+        if not file or not file.get("channel_source"):
+            raise HTTPException(status_code=404, detail="Channel file not found")
+        return await _stream_channel_file(file, request)
