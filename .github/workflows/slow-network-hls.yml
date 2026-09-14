@@ -1,7 +1,0 @@
-name: Slow Network HLS Instant Start
-
-on:
-  workflow_dispatch:
-
-# One-time HLS migration is complete. Kept as a manual workflow placeholder;
-# it must not rewrite backend/hls_service.py on normal pushes.
