@@ -3,7 +3,7 @@ import os
 import shutil
 from pathlib import Path
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 import main
 
@@ -152,6 +152,20 @@ async def prepare_hls(file_id: int):
     return file
 
 
+def _hls_response(path: Path, media_type: str) -> Response:
+    """Serve HLS assets as complete HTTP resources (200), not Range responses (206)."""
+    body = path.read_bytes()
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "Content-Length": str(len(body)),
+            "Accept-Ranges": "none",
+        },
+    )
+
+
 def register_hls_routes(app):
     @app.get("/api/hls/{token}/{file_id}/master.m3u8")
     async def hls_master(token: str, file_id: int):
@@ -167,7 +181,7 @@ def register_hls_routes(app):
         master = _master_path(file_id)
         if not master.is_file():
             raise HTTPException(status_code=503, detail="HLS playlist is not ready")
-        return FileResponse(master, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "public, max-age=3600"})
+        return _hls_response(master, "application/vnd.apple.mpegurl")
 
     @app.get("/api/hls/{token}/{file_id}/{variant}/{asset}")
     async def hls_asset(token: str, file_id: int, variant: str, asset: str):
@@ -180,7 +194,7 @@ def register_hls_routes(app):
         if not candidate.exists() or not candidate.is_file():
             raise HTTPException(status_code=404, detail="HLS asset not found")
         media = "application/vnd.apple.mpegurl" if candidate.suffix == ".m3u8" else "video/mp2t"
-        return FileResponse(candidate, media_type=media, headers={"Cache-Control": "public, max-age=3600"})
+        return _hls_response(candidate, media)
 
     @app.get("/api/hls/{token}/{file_id}/status")
     async def hls_status(token: str, file_id: int):
