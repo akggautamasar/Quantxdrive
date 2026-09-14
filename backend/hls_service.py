@@ -11,6 +11,7 @@ HLS_ROOT = Path(os.getenv("HLS_CACHE_DIR", "/tmp/quantxdrive-hls"))
 HLS_ROOT.mkdir(parents=True, exist_ok=True)
 PREPARE_LOCKS = {}
 PREPARE_TASKS = {}
+PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
 MAX_HLS_SOURCE_BYTES = int(os.getenv("HLS_MAX_SOURCE_BYTES", str(2 * 1024 * 1024 * 1024)))
 
@@ -32,9 +33,12 @@ def _task_done(file_id: int, task: asyncio.Task):
     PREPARE_TASKS.pop(file_id, None)
     try:
         task.result()
+        PREPARE_FAILED.discard(file_id)
     except asyncio.CancelledError:
+        PREPARE_FAILED.add(file_id)
         print(f"⚠️ HLS preparation cancelled for file {file_id}", flush=True)
     except Exception as exc:
+        PREPARE_FAILED.add(file_id)
         print(f"❌ HLS preparation failed for file {file_id}: {exc}", flush=True)
 
 
@@ -42,10 +46,12 @@ async def _start_prepare(file_id: int):
     """Start preparation without blocking the video request."""
     async with PREPARE_LOCKS_GUARD:
         if _master_path(file_id).exists():
+            PREPARE_FAILED.discard(file_id)
             return True
         task = PREPARE_TASKS.get(file_id)
         if task and not task.done():
             return False
+        PREPARE_FAILED.discard(file_id)
         task = asyncio.create_task(prepare_hls(file_id))
         PREPARE_TASKS[file_id] = task
         task.add_done_callback(lambda t, fid=file_id: _task_done(fid, t))
@@ -200,12 +206,18 @@ def register_hls_routes(app):
     async def hls_status(token: str, file_id: int):
         if not main.verify_jwt(token):
             raise HTTPException(status_code=401, detail="Invalid token")
+        file = await main.db.get_file_by_id(file_id)
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+
         master = _master_path(file_id)
         if master.exists():
+            PREPARE_FAILED.discard(file_id)
             return {"ready": True, "preparing": False, "failed": False}
 
-        # Status polling must also bootstrap preparation. After a Render restart
-        # PREPARE_TASKS is empty, so waiting for the master alone would deadlock.
+        if file_id in PREPARE_FAILED:
+            return {"ready": False, "preparing": False, "failed": True}
+
         task = PREPARE_TASKS.get(file_id)
         if not task or task.done():
             await _start_prepare(file_id)
@@ -214,5 +226,5 @@ def register_hls_routes(app):
         return {
             "ready": master.exists(),
             "preparing": bool(task and not task.done()),
-            "failed": bool(task and task.done() and not task.cancelled() and task.exception()),
+            "failed": file_id in PREPARE_FAILED,
         }
