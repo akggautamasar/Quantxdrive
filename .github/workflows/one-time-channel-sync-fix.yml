@@ -1,0 +1,81 @@
+name: One-time channel sync fix
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, 'Fix channel sync request body') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch sync request handling
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('backend/channels_service.py')
+          s = p.read_text()
+          old = '''    @app.post("/api/channels/{channel_id}/sync")
+          async def sync_channel(channel_id: int, body: Optional[dict] = None, _: bool = Depends(main.verify_token)):
+              limit = int((body or {}).get("limit", 0) or 0)
+              try:
+                  cfg = await _sync_channel(channel_id, max(0, min(limit, 10000)))
+                  return {"channel": cfg, "synced": True}
+              except HTTPException:
+                  raise
+              except Exception as exc:
+                  import traceback
+                  traceback.print_exc()
+                  raise HTTPException(status_code=502, detail=f"Channel sync failed: {type(exc).__name__}: {exc}")
+          '''
+          new = '''    @app.post("/api/channels/{channel_id}/sync")
+          async def sync_channel(channel_id: int, request: Request, _: bool = Depends(main.verify_token)):
+              # Accept JSON when the client sends it, but never require a JSON
+              # content-type/body just to start a full channel sync.
+              limit = 0
+              try:
+                  if "application/json" in (request.headers.get("content-type") or ""):
+                      body = await request.json()
+                      if isinstance(body, dict):
+                          limit = int(body.get("limit", 0) or 0)
+              except Exception:
+                  limit = 0
+              try:
+                  cfg = await _sync_channel(channel_id, max(0, min(limit, 10000)))
+                  return {"channel": cfg, "synced": True}
+              except HTTPException:
+                  raise
+              except Exception as exc:
+                  import traceback
+                  traceback.print_exc()
+                  raise HTTPException(status_code=502, detail=f"Channel sync failed: {type(exc).__name__}: {exc}")
+          '''
+          if old not in s:
+              raise SystemExit('Expected sync route block not found')
+          p.write_text(s.replace(old, new))
+
+          p = Path('frontend/src/Channels.jsx')
+          s = p.read_text()
+          old = 'method:"POST",headers:{Authorization:`Bearer ${token}`},body:JSON.stringify({limit:0})'
+          new = 'method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({limit:0})'
+          if old not in s:
+              raise SystemExit('Expected frontend sync request not found')
+          p.write_text(s.replace(old, new))
+          PY
+      - name: Verify patched files
+        run: |
+          python -m py_compile backend/channels_service.py
+          grep -q 'Content-Type\\":\\"application/json' frontend/src/Channels.jsx
+      - name: Commit and push fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/channels_service.py frontend/src/Channels.jsx .github/workflows/one-time-channel-sync-fix.yml
+          git rm .github/workflows/one-time-channel-sync-fix.yml
+          git commit -m "Fix channel sync request body handling"
+          git push
