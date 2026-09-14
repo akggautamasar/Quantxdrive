@@ -2,10 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 
 const QUALITY_OPTIONS = [
-  { id: "v0", label: "144p", note: "Best for very slow internet" },
-  { id: "v1", label: "240p", note: "Balanced data use" },
-  { id: "v2", label: "360p", note: "Better picture quality" },
+  { id: "v0", label: "144p", height: 144, note: "Best for very slow internet" },
+  { id: "v1", label: "240p", height: 240, note: "Balanced data use" },
+  { id: "v2", label: "360p", height: 360, note: "Low data, clearer picture" },
+  { id: "v3", label: "480p", height: 480, note: "Good everyday quality" },
+  { id: "v4", label: "720p", height: 720, note: "HD quality" },
+  { id: "v5", label: "1080p", height: 1080, note: "Full HD quality" },
+  { id: "v6", label: "1440p", height: 1440, note: "2K quality" },
+  { id: "v7", label: "2160p", height: 2160, note: "4K quality" },
 ];
+
+const QUALITY_BY_ID = Object.fromEntries(QUALITY_OPTIONS.map(q => [q.id, q]));
 
 export default function AdaptiveVideo({
   src,
@@ -18,13 +25,13 @@ export default function AdaptiveVideo({
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
   const pollRef = useRef(null);
+  const resumeTimeRef = useRef(0);
+
   const [mode, setMode] = useState(null);
   const [selectedQuality, setSelectedQuality] = useState(null);
-  const [available, setAvailable] = useState([]);
+  const [supported, setSupported] = useState(QUALITY_OPTIONS.map(q => q.id));
   const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState("");
-  const [levels, setLevels] = useState([]);
-  const [level, setLevel] = useState(-1);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -45,7 +52,6 @@ export default function AdaptiveVideo({
     if (!video || mode !== "slow" || !selectedQuality || !src) return undefined;
 
     let cancelled = false;
-    let lastCount = 0;
 
     const stopPoll = () => {
       if (pollRef.current) {
@@ -61,8 +67,15 @@ export default function AdaptiveVideo({
       }
     };
 
-    const targetIndex = QUALITY_OPTIONS.findIndex(q => q.id === selectedQuality);
-    const target = targetIndex >= 0 ? targetIndex : 0;
+    const targetHeight = QUALITY_BY_ID[selectedQuality]?.height || 144;
+    const resumeAt = resumeTimeRef.current;
+    resumeTimeRef.current = 0;
+
+    const setResume = () => {
+      if (resumeAt > 0) {
+        try { video.currentTime = resumeAt; } catch {}
+      }
+    };
 
     const startNativeHls = () => {
       if (cancelled || !video.canPlayType("application/vnd.apple.mpegurl")) return false;
@@ -73,19 +86,20 @@ export default function AdaptiveVideo({
         if (cancelled) return;
         setPreparing(false);
         setError("");
+        setResume();
         if (autoPlay) video.play().catch(() => {});
       };
       video.addEventListener("loadedmetadata", onMetadata, { once: true });
       return true;
     };
 
-    const startHls = count => {
-      if (cancelled || hlsRef.current || count <= target) return;
-      lastCount = count;
+    const startHls = () => {
+      if (cancelled || hlsRef.current) return;
       if (!Hls.isSupported()) {
         startNativeHls();
         return;
       }
+
       setPreparing(true);
       setError("");
 
@@ -93,16 +107,16 @@ export default function AdaptiveVideo({
         enableWorker: true,
         autoStartLoad: true,
         capLevelToPlayerSize: false,
-        startLevel: target,
+        startLevel: -1,
         abrEwmaDefaultEstimate: 120000,
         abrBandWidthFactor: 0.8,
         abrBandWidthUpFactor: 0.7,
         maxBufferLength: 8,
         maxMaxBufferLength: 20,
         backBufferLength: 10,
-        fragLoadingMaxRetry: 6,
-        manifestLoadingMaxRetry: 6,
-        levelLoadingMaxRetry: 6,
+        fragLoadingMaxRetry: 8,
+        manifestLoadingMaxRetry: 8,
+        levelLoadingMaxRetry: 8,
         manifestLoadingRetryDelay: 1000,
         levelLoadingRetryDelay: 1000,
         fragLoadingRetryDelay: 500,
@@ -112,16 +126,16 @@ export default function AdaptiveVideo({
       hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
         if (cancelled) return;
         const nextLevels = data.levels || [];
-        setLevels(nextLevels);
-        if (!nextLevels[target]) {
+        const target = nextLevels.findIndex(l => l.height === targetHeight);
+        if (target < 0) {
           setPreparing(true);
           return;
         }
-        setLevel(target);
         hls.currentLevel = target;
         setPreparing(false);
         setError("");
-        if (autoPlay) video.play().catch(() => {});
+        setResume();
+        if (autoPlay || !video.paused) video.play().catch(() => {});
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
@@ -136,7 +150,7 @@ export default function AdaptiveVideo({
           try { hls.recoverMediaError(); return; } catch {}
         }
         setPreparing(false);
-        setError("HLS playback could not be started. Please retry.");
+        setError("This quality could not be played. Try another quality.");
       });
 
       hls.attachMedia(video);
@@ -147,43 +161,27 @@ export default function AdaptiveVideo({
       });
     };
 
-    const refreshManifest = count => {
-      const hls = hlsRef.current;
-      if (!hls || cancelled || count <= lastCount) return;
-      lastCount = count;
-      const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-      const wasPlaying = !video.paused;
-      try {
-        hls.once(Hls.Events.MANIFEST_PARSED, (_, data) => {
-          if (cancelled) return;
-          const nextLevels = data.levels || [];
-          setLevels(nextLevels);
-          if (nextLevels[target]) {
-            hls.currentLevel = target;
-            setLevel(target);
-            setPreparing(false);
-            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
-            if (wasPlaying || autoPlay) video.play().catch(() => {});
-          }
-        });
-        hls.loadSource(`${src}?q=${count}`);
-        hls.startLoad(0);
-      } catch {}
-    };
-
     const pollStatus = async () => {
       if (cancelled) return;
       try {
-        const r = await fetch(src.replace(/\/master\.m3u8$/, "/status"), { cache: "no-store" });
+        const separator = src.includes("?") ? "&" : "?";
+        const statusUrl = `${src.replace(/\/master\.m3u8$/, "/status")}${separator}quality=${encodeURIComponent(selectedQuality)}`;
+        const r = await fetch(statusUrl, { cache: "no-store" });
         if (r.ok) {
           const d = await r.json();
           const names = Array.isArray(d.qualities) ? d.qualities : [];
-          setAvailable(names);
-          if (names.length > target && !hlsRef.current) startHls(names.length);
-          else if (hlsRef.current && names.length > lastCount) refreshManifest(names.length);
-          if (d.failed && !hlsRef.current) {
+          const nextSupported = Array.isArray(d.supported) && d.supported.length
+            ? d.supported
+            : QUALITY_OPTIONS.map(q => q.id);
+          setSupported(nextSupported);
+          if (names.includes(selectedQuality)) {
+            if (!hlsRef.current) startHls();
+          } else {
+            setPreparing(true);
+          }
+          if (d.failed && !names.includes(selectedQuality)) {
             setPreparing(false);
-            setError("Could not prepare the low-bandwidth stream. Please retry.");
+            setError(`Could not prepare ${QUALITY_BY_ID[selectedQuality]?.label || selectedQuality}. Try another quality.`);
           }
         }
       } catch {}
@@ -192,13 +190,12 @@ export default function AdaptiveVideo({
 
     setPreparing(true);
     setError("");
-    setLevels([]);
-    setLevel(-1);
     pollStatus();
 
     return () => {
       cancelled = true;
       stopPoll();
+      if (Number.isFinite(video.currentTime)) resumeTimeRef.current = video.currentTime;
       destroyHls();
       video.removeAttribute("src");
       video.load();
@@ -206,23 +203,25 @@ export default function AdaptiveVideo({
   }, [mode, selectedQuality, src, autoPlay]);
 
   const chooseMode = nextMode => {
+    if (videoRef.current && Number.isFinite(videoRef.current.currentTime)) {
+      resumeTimeRef.current = videoRef.current.currentTime;
+    }
     setError("");
     setSelectedQuality(null);
-    setAvailable([]);
-    setLevels([]);
-    setLevel(-1);
+    setSupported(QUALITY_OPTIONS.map(q => q.id));
     setMode(nextMode);
   };
 
   const chooseQuality = quality => {
+    if (quality === selectedQuality && hlsRef.current) return;
+    if (videoRef.current && Number.isFinite(videoRef.current.currentTime)) {
+      resumeTimeRef.current = videoRef.current.currentTime;
+    }
+    setError("");
     setSelectedQuality(quality);
   };
 
-  const chooseLevel = e => {
-    const next = Number(e.target.value);
-    setLevel(next);
-    if (hlsRef.current) hlsRef.current.currentLevel = next;
-  };
+  const visibleQualities = QUALITY_OPTIONS.filter(q => supported.includes(q.id));
 
   return (
     <div style={{ position: "relative", width: "100%", background: "#000", borderRadius: 10, overflow: "hidden" }}>
@@ -263,29 +262,43 @@ export default function AdaptiveVideo({
             <p style={{ fontSize: 18, fontWeight: 900 }}>Choose video quality</p>
             <p style={{ marginTop: 5, color: "#b9bdd2", fontSize: 11 }}>Lower quality uses much less data and works better on slow connections.</p>
             <div style={{ display: "grid", gap: 8, marginTop: 16 }}>
-              {QUALITY_OPTIONS.map(q => (
+              {visibleQualities.map(q => (
                 <button key={q.id} onClick={() => chooseQuality(q.id)} style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", border: "1px solid rgba(255,255,255,.16)", borderRadius: 11, padding: "11px 13px", background: "rgba(255,255,255,.08)", color: "white", cursor: "pointer", textAlign: "left" }}>
-                  <div style={{ minWidth: 54, fontSize: 17, fontWeight: 900 }}>{q.label}</div>
+                  <div style={{ minWidth: 60, fontSize: 17, fontWeight: 900 }}>{q.label}</div>
                   <div style={{ flex: 1 }}><div style={{ fontSize: 11, fontWeight: 800 }}>{q.note}</div><div style={{ marginTop: 2, fontSize: 9, color: "#b9bdd2" }}>Select this quality</div></div>
                   <span style={{ fontSize: 15 }}>▶</span>
                 </button>
               ))}
             </div>
-            <p style={{ marginTop: 10, fontSize: 9, color: "#8d91a8" }}>Higher qualities may take a little longer to prepare the first time.</p>
           </div>
         </div>
       )}
 
-      {mode === "slow" && selectedQuality && preparing && (
-        <div style={{ position: "absolute", top: 10, left: 10, zIndex: 6, background: "rgba(0,0,0,.78)", color: "white", borderRadius: 8, padding: "6px 9px", fontSize: 11, fontWeight: 800, pointerEvents: "none" }}>
-          ⚡ Preparing {QUALITY_OPTIONS.find(q => q.id === selectedQuality)?.label || selectedQuality}…
-        </div>
+      {mode === "slow" && selectedQuality && (
+        <>
+          {preparing && (
+            <div style={{ position: "absolute", top: 10, left: 10, zIndex: 6, background: "rgba(0,0,0,.78)", color: "white", borderRadius: 8, padding: "6px 9px", fontSize: 11, fontWeight: 800, pointerEvents: "none" }}>
+              ⚡ Preparing {QUALITY_BY_ID[selectedQuality]?.label || selectedQuality}…
+            </div>
+          )}
+          <select
+            value={selectedQuality}
+            onChange={e => chooseQuality(e.target.value)}
+            aria-label="Video quality"
+            style={{ position: "absolute", right: 10, bottom: 42, zIndex: 7, background: "rgba(0,0,0,.78)", color: "white", border: "1px solid rgba(255,255,255,.2)", borderRadius: 6, padding: "4px 7px", fontSize: 11 }}
+          >
+            {visibleQualities.map(q => <option key={q.id} value={q.id}>{q.label}</option>)}
+          </select>
+        </>
       )}
 
-      {mode === "slow" && selectedQuality && levels.length > 1 && (
-        <select value={level} onChange={chooseLevel} aria-label="Video quality" style={{ position: "absolute", right: 10, bottom: 42, zIndex: 7, background: "rgba(0,0,0,.78)", color: "white", border: "1px solid rgba(255,255,255,.2)", borderRadius: 6, padding: "4px 7px", fontSize: 11 }}>
-          {levels.map((l, i) => <option key={`${l.height}-${i}`} value={i}>{l.height ? `${l.height}p` : `${Math.round((l.bitrate || 0) / 1000)} kbps`}</option>)}
-        </select>
+      {mode === "slow" && selectedQuality && (
+        <button
+          onClick={() => chooseMode(null)}
+          style={{ position: "absolute", top: 10, right: 10, zIndex: 7, border: "1px solid rgba(255,255,255,.2)", borderRadius: 7, padding: "5px 8px", background: "rgba(0,0,0,.72)", color: "white", cursor: "pointer", fontSize: 10 }}
+        >
+          Change mode
+        </button>
       )}
 
       {error && <div style={{ position: "absolute", inset: 0, zIndex: 12, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, color: "white", background: "rgba(0,0,0,.72)", textAlign: "center", fontSize: 12, fontWeight: 700 }}>{error}</div>}
