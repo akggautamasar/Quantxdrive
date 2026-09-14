@@ -25,24 +25,81 @@ function loadHls() {
 export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, style, className, ...props }) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
-  const fallbackUsedRef = useRef(false);
   const [levels, setLevels] = useState([]);
   const [level, setLevel] = useState(-1);
   const [error, setError] = useState("");
   const [preparing, setPreparing] = useState(false);
   const pollRef = useRef(null);
   const hlsStartedRef = useRef(false);
+  const qualityCountRef = useRef(0);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !fallbackSrc) return undefined;
     let cancelled = false;
-    const stopPoll = () => { if (pollRef.current) { clearTimeout(pollRef.current); pollRef.current = null; } };
-    const destroyHls = () => { if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; } };
-    const directPlay = () => { if (cancelled) return; destroyHls(); video.src = fallbackSrc; video.load(); if (autoPlay) video.play().catch(() => {}); };
-    const startHls = async () => {
+    const stopPoll = () => {
+      if (pollRef.current) {
+        clearTimeout(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+    const destroyHls = () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+    const directPlay = () => {
+      if (cancelled) return;
+      destroyHls();
+      hlsStartedRef.current = false;
+      qualityCountRef.current = 0;
+      video.src = fallbackSrc;
+      video.load();
+      if (autoPlay) video.play().catch(() => {});
+    };
+
+    const reloadHlsManifest = count => {
+      if (cancelled || !hlsStartedRef.current || !src || count <= qualityCountRef.current) return;
+      const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      const wasPlaying = !video.paused;
+      qualityCountRef.current = count;
+      const nextSrc = `${src}${src.includes("?") ? "&" : "?"}q=${count}`;
+
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.loadSource(nextSrc);
+          hlsRef.current.attachMedia(video);
+          const restore = () => {
+            if (resumeAt > 0) {
+              try { video.currentTime = resumeAt; } catch {}
+            }
+            if (wasPlaying || autoPlay) video.play().catch(() => {});
+          };
+          if (video.readyState >= 1) restore();
+          else video.addEventListener("loadedmetadata", restore, { once: true });
+          return;
+        } catch {}
+      }
+
+      // Safari/native HLS has no hls.js instance. Changing the query string
+      // forces a fresh master request while preserving the current position.
+      video.src = nextSrc;
+      video.load();
+      const restore = () => {
+        if (resumeAt > 0) {
+          try { video.currentTime = resumeAt; } catch {}
+        }
+        if (wasPlaying || autoPlay) video.play().catch(() => {});
+      };
+      video.addEventListener("loadedmetadata", restore, { once: true });
+    };
+
+    const startHls = async initialCount => {
       if (cancelled || hlsStartedRef.current || !src) return;
-      hlsStartedRef.current = true; stopPoll(); setPreparing(false);
+      hlsStartedRef.current = true;
+      qualityCountRef.current = initialCount || 1;
+      setPreparing(true);
       const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       const wasPlaying = !video.paused;
       try {
@@ -50,55 +107,135 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         if (cancelled || !Hls) return;
         if (video.canPlayType("application/vnd.apple.mpegurl")) {
           video.src = src;
-          video.addEventListener("loadedmetadata", () => { if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} } if (wasPlaying || autoPlay) video.play().catch(() => {}); }, { once: true });
+          video.addEventListener("loadedmetadata", () => {
+            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
+            if (wasPlaying || autoPlay) video.play().catch(() => {});
+          }, { once: true });
           return;
         }
-        if (!Hls.isSupported()) return;
-        const hls = new Hls({ enableWorker:true, capLevelToPlayerSize:true, startLevel:0, abrEwmaDefaultEstimate:120000, abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.7, maxBufferLength:8, maxMaxBufferLength:20, backBufferLength:10, fragLoadingMaxRetry:4, manifestLoadingMaxRetry:3, levelLoadingMaxRetry:4 });
+        if (!Hls.isSupported()) {
+          directPlay();
+          return;
+        }
+        const hls = new Hls({
+          enableWorker: true,
+          capLevelToPlayerSize: true,
+          startLevel: 0,
+          abrEwmaDefaultEstimate: 120000,
+          abrBandWidthFactor: 0.8,
+          abrBandWidthUpFactor: 0.7,
+          maxBufferLength: 8,
+          maxMaxBufferLength: 20,
+          backBufferLength: 10,
+          fragLoadingMaxRetry: 4,
+          manifestLoadingMaxRetry: 3,
+          levelLoadingMaxRetry: 4,
+        });
         hlsRef.current = hls;
         hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
-          if (cancelled) return; setLevels(data.levels || []);
-          const restore=()=>{ if(resumeAt>0){try{video.currentTime=resumeAt}catch{}} if(wasPlaying||autoPlay)video.play().catch(()=>{}); };
-          if(video.readyState>=1) restore(); else video.addEventListener("loadedmetadata",restore,{once:true});
+          if (cancelled) return;
+          setLevels(data.levels || []);
+          const restore = () => {
+            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
+            if (wasPlaying || autoPlay) video.play().catch(() => {});
+          };
+          if (video.readyState >= 1) restore();
+          else video.addEventListener("loadedmetadata", restore, { once: true });
         });
         hls.on(Hls.Events.ERROR, (_, data) => {
-          if(cancelled || !data?.fatal) return;
-          if(data.type===Hls.ErrorTypes.MEDIA_ERROR){try{hls.recoverMediaError();return}catch{}}
-          hlsStartedRef.current=false; setLevels([]); setLevel(-1); directPlay();
+          if (cancelled || !data?.fatal) return;
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            try { hls.recoverMediaError(); return; } catch {}
+          }
+          hlsStartedRef.current = false;
+          qualityCountRef.current = 0;
+          setLevels([]);
+          setLevel(-1);
+          directPlay();
         });
-        hls.loadSource(src); hls.attachMedia(video);
-      } catch { if(!cancelled){hlsStartedRef.current=false;directPlay();} }
+        hls.loadSource(src);
+        hls.attachMedia(video);
+      } catch {
+        if (!cancelled) {
+          hlsStartedRef.current = false;
+          directPlay();
+        }
+      }
     };
+
     const pollStatus = async () => {
-      if(cancelled || hlsStartedRef.current || !src) return;
+      if (cancelled || !src) return;
       try {
-        const r=await fetch(src.replace(/\/master\.m3u8$/, "/status"), {cache:"no-store"});
-        if(r.ok){ const d=await r.json(); if(d.ready){await startHls();return;} setPreparing(!!d.preparing); }
+        const r = await fetch(src.replace(/\/master\.m3u8$/, "/status"), { cache: "no-store" });
+        if (r.ok) {
+          const d = await r.json();
+          const count = Array.isArray(d.qualities) ? d.qualities.length : 0;
+          setPreparing(!!d.preparing && count < 3);
+          if (!hlsStartedRef.current && (d.ready || count > 0)) {
+            await startHls(count || 1);
+          } else if (hlsStartedRef.current && count > qualityCountRef.current) {
+            reloadHlsManifest(count);
+          }
+          if (d.failed && !d.ready) setPreparing(false);
+        }
       } catch {}
-      if(!cancelled&&!hlsStartedRef.current) pollRef.current=setTimeout(pollStatus,3000);
+      if (!cancelled) pollRef.current = setTimeout(pollStatus, 4000);
     };
-    hlsStartedRef.current=false; setLevels([]); setLevel(-1); setPreparing(false); setError("");
-    // Direct Telegram Range playback starts immediately. HLS preparation never blocks it.
+
+    hlsStartedRef.current = false;
+    qualityCountRef.current = 0;
+    setLevels([]);
+    setLevel(-1);
+    setPreparing(false);
+    setError("");
+
+    // Direct Telegram Range playback starts immediately. HLS is a progressive
+    // enhancement and no longer blocks playback while the rolling source prepares.
     directPlay();
     pollStatus();
-    return()=>{cancelled=true;stopPoll();destroyHls();video.removeAttribute("src");video.load();};
+
+    return () => {
+      cancelled = true;
+      stopPoll();
+      destroyHls();
+      video.removeAttribute("src");
+      video.load();
+    };
   }, [src, fallbackSrc, autoPlay]);
 
-  const chooseLevel = e => { const next=Number(e.target.value); setLevel(next); if(hlsRef.current) hlsRef.current.currentLevel=next; };
+  const chooseLevel = e => {
+    const next = Number(e.target.value);
+    setLevel(next);
+    if (hlsRef.current) hlsRef.current.currentLevel = next;
+  };
 
   return (
-    <div style={{ position:"relative", width:"100%", background:"#000", borderRadius:10, overflow:"hidden" }}>
-      <video ref={videoRef} controls playsInline preload="auto" className={className}
-        onError={() => { if (!hlsStartedRef.current && fallbackSrc) directFallback(videoRef.current, fallbackSrc, autoPlay); }}
-        style={{ width:"100%", display:"block", background:"#000", ...style }} {...props} />
-      {preparing && <div style={{ position:"absolute", top:10, left:10, zIndex:6, background:"rgba(0,0,0,.72)", color:"white", borderRadius:7, padding:"5px 8px", fontSize:10, fontWeight:700, pointerEvents:"none" }}>⚡ Playing now · Adaptive quality preparing…</div>}
-      {levels.length > 0 && <select value={level} onChange={chooseLevel} aria-label="Video quality" style={{ position:"absolute", right:10, bottom:42, zIndex:5, background:"rgba(0,0,0,.78)", color:"white", border:"1px solid rgba(255,255,255,.2)", borderRadius:6, padding:"4px 7px", fontSize:11 }}>
+    <div style={{ position: "relative", width: "100%", background: "#000", borderRadius: 10, overflow: "hidden" }}>
+      <video
+        ref={videoRef}
+        controls
+        playsInline
+        preload="auto"
+        className={className}
+        onError={() => {
+          if (!hlsStartedRef.current && fallbackSrc) directFallback(videoRef.current, fallbackSrc, autoPlay);
+        }}
+        style={{ width: "100%", display: "block", background: "#000", ...style }}
+        {...props}
+      />
+      {preparing && <div style={{ position: "absolute", top: 10, left: 10, zIndex: 6, background: "rgba(0,0,0,.72)", color: "white", borderRadius: 7, padding: "5px 8px", fontSize: 10, fontWeight: 700, pointerEvents: "none" }}>⚡ Playing now · Adaptive quality preparing…</div>}
+      {levels.length > 0 && <select value={level} onChange={chooseLevel} aria-label="Video quality" style={{ position: "absolute", right: 10, bottom: 42, zIndex: 5, background: "rgba(0,0,0,.78)", color: "white", border: "1px solid rgba(255,255,255,.2)", borderRadius: 6, padding: "4px 7px", fontSize: 11 }}>
         <option value={-1}>Auto</option>
-        {levels.map((l,i)=><option key={`${l.height}-${i}`} value={i}>{l.height?`${l.height}p`:`${Math.round((l.bitrate||0)/1000)} kbps`}</option>)}
+        {levels.map((l, i) => <option key={`${l.height}-${i}`} value={i}>{l.height ? `${l.height}p` : `${Math.round((l.bitrate || 0) / 1000)} kbps`}</option>)}
       </select>}
-      {error && <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", padding:20, color:"white", background:"rgba(0,0,0,.72)", textAlign:"center", fontSize:12, fontWeight:700 }}>{error}</div>}
+      {error && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, color: "white", background: "rgba(0,0,0,.72)", textAlign: "center", fontSize: 12, fontWeight: 700 }}>{error}</div>}
     </div>
   );
 }
 
-function directFallback(video, fallbackSrc, autoPlay) { if (!video || !fallbackSrc) return; video.src=fallbackSrc; video.load(); if(autoPlay) video.play().catch(()=>{}); }
+function directFallback(video, fallbackSrc, autoPlay) {
+  if (!video || !fallbackSrc) return;
+  video.src = fallbackSrc;
+  video.load();
+  if (autoPlay) video.play().catch(() => {});
+}
