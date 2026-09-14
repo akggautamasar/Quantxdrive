@@ -7,24 +7,38 @@ FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-20
 
 mkdir -p "$FFMPEG_DIR"
 
-if [[ -x "$FFMPEG" ]]; then
+validate_ffmpeg() {
+  local binary="$1"
+  [[ -x "$binary" ]] || return 1
+  "$binary" -hide_banner -h protocol=http 2>&1 | grep -q request_size || return 1
+  "$binary" -hide_banner -h protocol=http 2>&1 | grep -q initial_request_size || return 1
+  "$binary" -hide_banner -h protocol=http 2>&1 | grep -q short_seek_size || return 1
+}
+
+if validate_ffmpeg "$FFMPEG"; then
   echo "🎬 Bundled Render FFmpeg already present: $FFMPEG"
   exit 0
 fi
 
-# Prefer the Python wheel because it is much smaller and is already installed
-# with backend requirements. This avoids a slow/fragile large tarball download.
+rm -f "$FFMPEG"
+
+# Prefer the Python wheel, but only if it has the HTTP range controls required
+# by QuantXDrive's seekable HLS source. imageio-ffmpeg may ship a generic build
+# without these options, so validate before accepting it.
 if python -c 'import imageio_ffmpeg' >/dev/null 2>&1; then
   packaged_ffmpeg="$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
-  if [[ -x "$packaged_ffmpeg" ]]; then
+  if validate_ffmpeg "$packaged_ffmpeg"; then
     echo "📦 Installing packaged FFmpeg from imageio-ffmpeg: $packaged_ffmpeg"
     install -m 0755 "$packaged_ffmpeg" "$FFMPEG"
+  else
+    echo "⚠️ Packaged imageio-ffmpeg binary lacks required HTTP range options; using Render fallback"
   fi
 fi
 
-# Last-resort fallback for environments where the Python wheel was not installed.
-if [[ ! -x "$FFMPEG" ]]; then
+# Last-resort static build with the required HTTP protocol controls.
+if ! validate_ffmpeg "$FFMPEG"; then
   echo "🌐 Downloading static Render FFmpeg fallback..."
+  rm -rf .render-ffmpeg-tmp
   mkdir -p .render-ffmpeg-tmp
   trap 'rm -rf .render-ffmpeg-tmp' EXIT
   curl --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 \
@@ -37,8 +51,5 @@ if [[ ! -x "$FFMPEG" ]]; then
 fi
 
 "$FFMPEG" -version | head -n 1
-"$FFMPEG" -hide_banner -h protocol=http 2>&1 | grep -q request_size
-"$FFMPEG" -hide_banner -h protocol=http 2>&1 | grep -q initial_request_size
-"$FFMPEG" -hide_banner -h protocol=http 2>&1 | grep -q short_seek_size
-
+validate_ffmpeg "$FFMPEG"
 echo "✅ Render FFmpeg installed at: $FFMPEG"
