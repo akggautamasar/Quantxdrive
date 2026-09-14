@@ -29,112 +29,59 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
   const [levels, setLevels] = useState([]);
   const [level, setLevel] = useState(-1);
   const [error, setError] = useState("");
+  const pollRef = useRef(null);
+  const hlsStartedRef = useRef(false);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !src) return undefined;
+    if (!video || !fallbackSrc) return undefined;
     let cancelled = false;
-
-    const destroyHls = () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-    };
-
-    const cleanup = () => {
-      destroyHls();
-      video.removeAttribute("src");
-      video.load();
-    };
-
-    const useFallback = () => {
-      if (cancelled || !fallbackSrc || fallbackUsedRef.current) return false;
-      fallbackUsedRef.current = true;
-      destroyHls();
-      setLevels([]);
-      setLevel(-1);
-      setError("");
-      video.src = fallbackSrc;
-      video.load();
-      if (autoPlay) video.play().catch(() => {});
-      return true;
-    };
-
-    fallbackUsedRef.current = false;
-    setError("");
-    setLevels([]);
-    setLevel(-1);
-
-    const start = async () => {
-      if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = src;
-        if (autoPlay) video.play().catch(() => {});
-        return;
-      }
-
+    const stopPoll = () => { if (pollRef.current) { clearTimeout(pollRef.current); pollRef.current = null; } };
+    const destroyHls = () => { if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; } };
+    const directPlay = () => { if (cancelled) return; destroyHls(); video.src = fallbackSrc; video.load(); if (autoPlay) video.play().catch(() => {}); };
+    const startHls = async () => {
+      if (cancelled || hlsStartedRef.current || !src) return;
+      hlsStartedRef.current = true; stopPoll();
+      const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      const wasPlaying = !video.paused;
       try {
         const Hls = await loadHls();
-        if (cancelled || !Hls || !Hls.isSupported()) {
-          if (!useFallback()) setError("This browser cannot play the video.");
+        if (cancelled || !Hls) return;
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = src;
+          video.addEventListener('loadedmetadata', () => { if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} } if (wasPlaying || autoPlay) video.play().catch(() => {}); }, { once: true });
           return;
         }
-
-        const hls = new Hls({
-          enableWorker: true,
-          capLevelToPlayerSize: true,
-          maxBufferLength: 12,
-          maxMaxBufferLength: 30,
-          backBufferLength: 20,
-          abrEwmaDefaultEstimate: 180000,
-          abrBandWidthFactor: 0.72,
-          abrBandWidthUpFactor: 0.65,
-          startLevel: -1,
-          autoStartLoad: true,
-          fragLoadingMaxRetry: 2,
-          manifestLoadingMaxRetry: 1,
-          levelLoadingMaxRetry: 1,
-        });
+        if (!Hls.isSupported()) return;
+        const hls = new Hls({ enableWorker:true, capLevelToPlayerSize:true, startLevel:0, abrEwmaDefaultEstimate:120000, abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.7, maxBufferLength:8, maxMaxBufferLength:20, backBufferLength:10, fragLoadingMaxRetry:4, manifestLoadingMaxRetry:3, levelLoadingMaxRetry:4 });
         hlsRef.current = hls;
-
         hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
-          if (cancelled) return;
-          setLevels(data.levels || []);
-          if (autoPlay) video.play().catch(() => {});
+          if (cancelled) return; setLevels(data.levels || []);
+          const restore=()=>{ if(resumeAt>0){try{video.currentTime=resumeAt}catch{}} if(wasPlaying||autoPlay)video.play().catch(()=>{}); };
+          if(video.readyState>=1) restore(); else video.addEventListener('loadedmetadata',restore,{once:true});
         });
-
         hls.on(Hls.Events.ERROR, (_, data) => {
-          if (cancelled || !data?.fatal) return;
-
-          // A missing/failed master playlist is not recoverable by repeatedly
-          // retrying. Immediately switch to the proven Range-based media URL.
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            useFallback();
-            if (!fallbackSrc) setError("Video stream could not be loaded. Please retry.");
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            try {
-              hls.recoverMediaError();
-            } catch {
-              useFallback();
-            }
-          } else {
-            useFallback();
-            if (!fallbackSrc) setError("Video stream could not be loaded. Please retry.");
-          }
+          if(cancelled || !data?.fatal) return;
+          if(data.type===Hls.ErrorTypes.MEDIA_ERROR){try{hls.recoverMediaError();return}catch{}}
+          hlsStartedRef.current=false; setLevels([]); setLevel(-1); directPlay();
         });
-
-        hls.loadSource(src);
-        hls.attachMedia(video);
-      } catch {
-        if (!cancelled && !useFallback()) setError("Unable to load the video.");
-      }
+        hls.loadSource(src); hls.attachMedia(video);
+      } catch { if(!cancelled) { hlsStartedRef.current=false; directPlay(); } }
     };
-
-    start();
-    return () => {
-      cancelled = true;
-      cleanup();
+    const pollStatus = async () => {
+      if(cancelled || hlsStartedRef.current || !src) return;
+      try {
+        const r=await fetch(src.replace(/\/master\.m3u8$/, '/status'), {cache:'no-store'});
+        if(r.ok){ const d=await r.json(); if(d.ready){ await startHls(); return; } setPreparing(!!d.preparing); }
+      } catch {}
+      if(!cancelled&&!hlsStartedRef.current) pollRef.current=setTimeout(pollStatus,3000);
     };
+    hlsStartedRef.current=false; setLevels([]); setLevel(-1); setPreparing(false); setError('');
+    // Direct Telegram Range playback is the primary path and starts immediately.
+    directPlay();
+    // HLS is prepared independently and takes over only when cached and ready.
+    pollStatus();
+    return () => { cancelled=true; stopPoll(); destroyHls(); video.removeAttribute('src'); video.load(); };
   }, [src, fallbackSrc, autoPlay]);
 
   const chooseLevel = e => {
@@ -149,7 +96,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         ref={videoRef}
         controls
         playsInline
-        preload="metadata"
+        preload="auto"
         className={className}
         onError={() => {
           if (!fallbackUsedRef.current && fallbackSrc) {
