@@ -3,9 +3,6 @@ import os
 import re
 import shutil
 import secrets
-import subprocess
-import tarfile
-import urllib.request
 from pathlib import Path
 
 from fastapi import HTTPException, Request
@@ -29,9 +26,10 @@ HLS_PROXY_SECRET = os.getenv("HLS_PROXY_SECRET") or secrets.token_urlsafe(32)
 HLS_PROXY_PORT = int(os.getenv("PORT", "8000"))
 TG_CHUNK_SIZE = 1024 * 1024
 
-FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-09-14-51/ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0.tar.xz"
-FFMPEG_DIR = Path("/tmp/quantxdrive-ffmpeg")
-FFMPEG_BINARY = FFMPEG_DIR / "ffmpeg"
+# Render installs the known-good FFmpeg build here during the backend build.
+# Do not fall back to the host/system FFmpeg: the HLS HTTP range options below
+# are required for bounded Telegram range reads on low-bandwidth streaming.
+FFMPEG_BINARY = Path(__file__).resolve().parent / ".render-ffmpeg" / "ffmpeg"
 
 VARIANTS = [
     ("v0", "256x144", "96k", "120k", "200k", "24k"),
@@ -59,46 +57,17 @@ async def _ensure_ffmpeg() -> str:
     async with FFMPEG_LOCK:
         if FFMPEG_PATH:
             return FFMPEG_PATH
-        system_ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
-        if await _ffmpeg_supports_range_options(system_ffmpeg):
-            FFMPEG_PATH = system_ffmpeg
-            print(f"🎬 Using system FFmpeg: {FFMPEG_PATH}", flush=True)
-            return FFMPEG_PATH
-        if FFMPEG_BINARY.exists() and await _ffmpeg_supports_range_options(str(FFMPEG_BINARY)):
-            FFMPEG_PATH = str(FFMPEG_BINARY)
-            print(f"🎬 Using cached modern FFmpeg: {FFMPEG_PATH}", flush=True)
-            return FFMPEG_PATH
-        print("⬇️ System FFmpeg lacks bounded HTTP range options; downloading modern FFmpeg", flush=True)
-        tmp_archive = Path("/tmp/quantxdrive-ffmpeg.tar.xz")
-        tmp_download = Path("/tmp/quantxdrive-ffmpeg.download")
-        FFMPEG_DIR.mkdir(parents=True, exist_ok=True)
-        def download():
-            with urllib.request.urlopen(FFMPEG_URL, timeout=120) as src, tmp_download.open("wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
-        await asyncio.to_thread(download)
-        tmp_archive.unlink(missing_ok=True)
-        tmp_download.replace(tmp_archive)
-        extract_root = Path("/tmp/quantxdrive-ffmpeg-extract")
-        shutil.rmtree(extract_root, ignore_errors=True)
-        extract_root.mkdir(parents=True, exist_ok=True)
-        def extract():
-            with tarfile.open(tmp_archive, "r:xz") as archive:
-                member = next((m for m in archive.getmembers() if m.name.endswith("/bin/ffmpeg")), None)
-                if not member:
-                    raise RuntimeError("Modern FFmpeg archive did not contain bin/ffmpeg")
-                archive.extract(member, extract_root)
-        await asyncio.to_thread(extract)
-        extracted = next(extract_root.rglob("ffmpeg"), None)
-        if not extracted or not extracted.is_file():
-            raise RuntimeError("Modern FFmpeg binary was not extracted")
-        shutil.copy2(extracted, FFMPEG_BINARY)
-        FFMPEG_BINARY.chmod(0o755)
-        tmp_archive.unlink(missing_ok=True)
-        shutil.rmtree(extract_root, ignore_errors=True)
-        if not await _ffmpeg_supports_range_options(str(FFMPEG_BINARY)):
-            raise RuntimeError("Downloaded FFmpeg does not support bounded HTTP range options")
-        FFMPEG_PATH = str(FFMPEG_BINARY)
-        print(f"✅ Modern FFmpeg ready: {FFMPEG_PATH}", flush=True)
+        bundled_ffmpeg = str(FFMPEG_BINARY)
+        if not FFMPEG_BINARY.is_file():
+            raise RuntimeError(f"Bundled Render FFmpeg not found: {bundled_ffmpeg}")
+        if not os.access(bundled_ffmpeg, os.X_OK):
+            raise RuntimeError(f"Bundled Render FFmpeg is not executable: {bundled_ffmpeg}")
+        if not await _ffmpeg_supports_range_options(bundled_ffmpeg):
+            raise RuntimeError(
+                f"Bundled Render FFmpeg lacks required HTTP range options: {bundled_ffmpeg}"
+            )
+        FFMPEG_PATH = bundled_ffmpeg
+        print(f"🎬 Using bundled Render FFmpeg: {FFMPEG_PATH}", flush=True)
         return FFMPEG_PATH
 
 def _dir(file_id: int) -> Path:
