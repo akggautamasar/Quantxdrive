@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shutil
 import secrets
 import subprocess
@@ -106,15 +107,20 @@ def _master_path(file_id: int) -> Path:
     return _dir(file_id) / "master.m3u8"
 
 def _master_is_valid(file_id: int) -> bool:
-    master = _master_path(file_id)
-    v0_playlist = _dir(file_id) / "v0" / "playlist.m3u8"
-    if not master.is_file() or not v0_playlist.is_file() or not list((_dir(file_id) / "v0").glob("seg_*.ts")):
+    root = _dir(file_id)
+    master = root / "master.m3u8"
+    v0_dir = root / "v0"
+    v0_playlist = v0_dir / "playlist.m3u8"
+    if not master.is_file() or not v0_playlist.is_file() or not list(v0_dir.glob("seg_*.ts")):
         return False
     try:
         text = master.read_text(encoding="utf-8")
     except Exception:
         return False
-    return "#EXTM3U" in text and "BANDWIDTH=" in text and "v0/playlist.m3u8" in text
+    if "#EXTM3U" not in text or "v0/playlist.m3u8" not in text:
+        return False
+    bandwidth_values = re.findall(r"(?:BANDWIDTH|AVERAGE-BANDWIDTH)=([^,\s]+)", text)
+    return bool(bandwidth_values) and all(value.isdigit() for value in bandwidth_values)
 
 async def _lock_for(file_id: int):
     async with PREPARE_LOCKS_GUARD:
