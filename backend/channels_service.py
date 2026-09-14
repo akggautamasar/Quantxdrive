@@ -118,13 +118,23 @@ async def _sync_channel(channel_id: int, limit: int = 0):
     target = ("@" + cfg.get("username")) if cfg and cfg.get("username") else channel_id
     chat, client, mode = await _resolve_with_clients(target)
     count = scanned = 0
-    async for message in client.get_chat_history(chat.id, limit=limit or 0):
+
+    # Pyrogram's get_chat_history() uses an omitted limit for the full history.
+    # Passing limit=0 does NOT mean "unlimited"; it can result in an empty scan.
+    # The frontend uses 0 to mean "all", so omit the parameter in that case.
+    if limit > 0:
+        history = client.get_chat_history(chat.id, limit=limit)
+    else:
+        history = client.get_chat_history(chat.id)
+
+    async for message in history:
         scanned += 1
         info = _media_info(message)
         if info:
             info["channel_access"] = mode
             await db.upsert_file(info)
             count += 1
+
     cfg = cfg or {"id": channel_id}
     cfg.update({
         "title": getattr(chat, "title", None) or getattr(chat, "first_name", None) or str(channel_id),
@@ -243,7 +253,15 @@ def register_routes(app):
     @app.post("/api/channels/{channel_id}/sync")
     async def sync_channel(channel_id: int, body: Optional[dict] = None, _: bool = Depends(main.verify_token)):
         limit = int((body or {}).get("limit", 0) or 0)
-        return {"channel": await _sync_channel(channel_id, max(0, min(limit, 10000)))}
+        try:
+            cfg = await _sync_channel(channel_id, max(0, min(limit, 10000)))
+            return {"channel": cfg, "synced": True}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=502, detail=f"Channel sync failed: {type(exc).__name__}: {exc}")
 
     @app.get("/api/channels/{channel_id}/files")
     async def channel_files(channel_id: int, type: str = "all", q: str = "", sort_by: str = "date", sort_dir: str = "desc", page: int = 1, limit: int = 50, _: bool = Depends(main.verify_token)):
