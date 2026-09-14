@@ -1,0 +1,59 @@
+name: Slow Network Player
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Apply slow-network player refresh'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch player
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p=Path('frontend/src/AdaptiveVideo.jsx')
+          s=p.read_text()
+          s=s.replace('  const hlsStartedRef = useRef(false);','  const hlsStartedRef = useRef(false);\n  const qualityCountRef = useRef(0);')
+          s=s.replace('      if (cancelled || hlsStartedRef.current || !src) return;','      if (cancelled || !src) return;')
+          old='''        if(r.ok){ const d=await r.json(); if(d.ready){await startHls();return;} setPreparing(!!d.preparing); }'''
+          new='''        if(r.ok){
+          const d=await r.json();
+          const count=(d.qualities||[]).length;
+          if(d.ready && !hlsStartedRef.current){ await startHls(); }
+          else if(hlsStartedRef.current && count>qualityCountRef.current && hlsRef.current){
+            qualityCountRef.current=count;
+            const wasPlaying=!video.paused;
+            const resumeAt=Number.isFinite(video.currentTime)?video.currentTime:0;
+            const hls=hlsRef.current;
+            hls.loadSource(src+(src.includes('?')?'&':'?')+'q='+count);
+            hls.once(Hls.Events.MANIFEST_PARSED,()=>{
+              try{if(resumeAt>0)video.currentTime=resumeAt}catch{}
+              if(wasPlaying||autoPlay)video.play().catch(()=>{});
+            });
+          }
+          setPreparing(!!d.preparing && count<3);
+          qualityCountRef.current=count;
+          if(d.failed){setPreparing(false);return;}
+        }'''
+          if old not in s:
+              raise SystemExit('status block not found')
+          s=s.replace(old,new)
+          s=s.replace('    hlsStartedRef.current=false; setLevels([]); setLevel(-1); setPreparing(false); setError("");','    hlsStartedRef.current=false; qualityCountRef.current=0; setLevels([]); setLevel(-1); setPreparing(false); setError("");')
+          s=s.replace('      if(!cancelled&&!hlsStartedRef.current) pollRef.current=setTimeout(pollStatus,3000);','      if(!cancelled) pollRef.current=setTimeout(pollStatus,4000);')
+          p.write_text(s)
+          PY
+      - name: Commit player change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add frontend/src/AdaptiveVideo.jsx
+          git diff --cached --check
+          git commit -m "Apply slow-network player refresh" || exit 0
+          git push
