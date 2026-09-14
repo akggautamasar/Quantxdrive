@@ -105,6 +105,17 @@ def _dir(file_id: int) -> Path:
 def _master_path(file_id: int) -> Path:
     return _dir(file_id) / "master.m3u8"
 
+def _master_is_valid(file_id: int) -> bool:
+    master = _master_path(file_id)
+    v0_playlist = _dir(file_id) / "v0" / "playlist.m3u8"
+    if not master.is_file() or not v0_playlist.is_file() or not list((_dir(file_id) / "v0").glob("seg_*.ts")):
+        return False
+    try:
+        text = master.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    return "#EXTM3U" in text and "BANDWIDTH=" in text and "v0/playlist.m3u8" in text
+
 async def _lock_for(file_id: int):
     async with PREPARE_LOCKS_GUARD:
         return PREPARE_LOCKS.setdefault(file_id, asyncio.Lock())
@@ -123,9 +134,12 @@ def _task_done(file_id: int, task: asyncio.Task):
 
 async def _start_prepare(file_id: int):
     async with PREPARE_LOCKS_GUARD:
-        if _master_path(file_id).exists():
+        if _master_is_valid(file_id):
             PREPARE_FAILED.discard(file_id)
             return True
+        stale_master = _master_path(file_id)
+        if stale_master.exists() and file_id not in PREPARE_TASKS:
+            shutil.rmtree(_dir(file_id), ignore_errors=True)
         task = PREPARE_TASKS.get(file_id)
         if task and not task.done():
             return False
@@ -136,13 +150,26 @@ async def _start_prepare(file_id: int):
         print(f"🚀 HLS preparation started in background for file {file_id}", flush=True)
         return False
 
+def _bitrate_to_int(value: str) -> int:
+    text = str(value).strip().lower()
+    if text.endswith("k"):
+        return int(float(text[:-1]) * 1000)
+    if text.endswith("m"):
+        return int(float(text[:-1]) * 1000000)
+    return int(float(text))
+
 def _write_master(out_dir: Path, names):
-    specs = {name: (resolution, maxrate) for name, resolution, _, maxrate, _, _ in VARIANTS}
+    specs = {
+        name: (resolution, maxrate, audio_bitrate)
+        for name, resolution, _, maxrate, _, audio_bitrate in VARIANTS
+    }
     lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
     for name in names:
-        resolution, bandwidth = specs[name]
+        resolution, maxrate, audio_bitrate = specs[name]
+        bandwidth = _bitrate_to_int(maxrate) + _bitrate_to_int(audio_bitrate)
+        average_bandwidth = bandwidth
         lines += [
-            f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={resolution}",
+            f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},RESOLUTION={resolution}",
             f"{name}/playlist.m3u8",
         ]
     tmp = out_dir / "master.m3u8.tmp"
@@ -210,11 +237,11 @@ async def prepare_hls(file_id: int):
     if not mime.startswith("video/"):
         raise HTTPException(status_code=400, detail="HLS is available only for videos")
     master = _master_path(file_id)
-    if master.exists():
+    if _master_is_valid(file_id):
         return file
     lock = await _lock_for(file_id)
     async with lock:
-        if master.exists():
+        if _master_is_valid(file_id):
             return file
         out_dir = _dir(file_id)
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -326,7 +353,7 @@ def register_hls_routes(app):
         if not main.verify_jwt(token): raise HTTPException(status_code=401, detail="Invalid token")
         if variant not in {"v0", "v1", "v2"} or "/" in asset or "\\" in asset or asset.startswith("."):
             raise HTTPException(status_code=404, detail="HLS asset not found")
-        if not _master_path(file_id).exists():
+        if not _master_is_valid(file_id):
             await _start_prepare(file_id)
             raise HTTPException(status_code=425, detail="HLS is still preparing")
         candidate = _dir(file_id) / variant / asset
@@ -339,14 +366,14 @@ def register_hls_routes(app):
         if not main.verify_jwt(token): raise HTTPException(status_code=401, detail="Invalid token")
         file = await main.db.get_file_by_id(file_id)
         if not file: raise HTTPException(status_code=404, detail="File not found")
-        master = _master_path(file_id)
-        if not master.exists() and file_id not in PREPARE_FAILED:
+        valid = _master_is_valid(file_id)
+        if not valid and file_id not in PREPARE_FAILED:
             task = PREPARE_TASKS.get(file_id)
             if not task or task.done():
                 await _start_prepare(file_id)
         task = PREPARE_TASKS.get(file_id)
         available = [name for name, *_ in VARIANTS if (_dir(file_id) / name / "playlist.m3u8").exists()]
-        ready = master.exists()
+        ready = _master_is_valid(file_id)
         if ready:
             PREPARE_FAILED.discard(file_id)
         return {"ready": ready, "preparing": bool(task and not task.done()), "failed": file_id in PREPARE_FAILED and not ready, "qualities": available}
