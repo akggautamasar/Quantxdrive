@@ -11,7 +11,6 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
   const pollRef = useRef(null);
   const hlsStartedRef = useRef(false);
   const qualityCountRef = useRef(0);
-  const lastReadyRef = useRef(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -48,15 +47,13 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
       const wasPlaying = !video.paused;
       qualityCountRef.current = count;
       const nextSrc = `${src}${src.includes("?") ? "&" : "?"}q=${count}`;
-
-      if (hlsRef.current) {
+      const hls = hlsRef.current;
+      if (hls) {
         try {
-          hlsRef.current.loadSource(nextSrc);
-          hlsRef.current.attachMedia(video);
+          hls.loadSource(nextSrc);
+          hls.startLoad();
           const restore = () => {
-            if (resumeAt > 0) {
-              try { video.currentTime = resumeAt; } catch {}
-            }
+            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
             if (wasPlaying || autoPlay) video.play().catch(() => {});
           };
           if (video.readyState >= 1) restore();
@@ -64,13 +61,10 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
           return;
         } catch {}
       }
-
       video.src = nextSrc;
       video.load();
       const restore = () => {
-        if (resumeAt > 0) {
-          try { video.currentTime = resumeAt; } catch {}
-        }
+        if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
         if (wasPlaying || autoPlay) video.play().catch(() => {});
       };
       video.addEventListener("loadedmetadata", restore, { once: true });
@@ -85,6 +79,74 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
       const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       const wasPlaying = !video.paused;
 
+      // Prefer Hls.js whenever the browser supports Media Source Extensions.
+      // Android Chrome can report a native HLS capability even though its
+      // native path does not reliably follow our authenticated relative
+      // variant/segment URLs. Hls.js gives us the deterministic playlist ->
+      // segment request path that this backend expects.
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          autoStartLoad: true,
+          capLevelToPlayerSize: true,
+          startLevel: 0,
+          abrEwmaDefaultEstimate: 120000,
+          abrBandWidthFactor: 0.8,
+          abrBandWidthUpFactor: 0.7,
+          maxBufferLength: 8,
+          maxMaxBufferLength: 20,
+          backBufferLength: 10,
+          fragLoadingMaxRetry: 6,
+          manifestLoadingMaxRetry: 6,
+          levelLoadingMaxRetry: 6,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingRetryDelay: 1000,
+          fragLoadingRetryDelay: 500,
+        });
+        hlsRef.current = hls;
+
+        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+          if (cancelled) return;
+          setLevels(data.levels || []);
+          setPreparing(false);
+          setError("");
+          const restore = () => {
+            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
+            if (wasPlaying || autoPlay) video.play().catch(() => {});
+          };
+          if (video.readyState >= 1) restore();
+          else video.addEventListener("loadedmetadata", restore, { once: true });
+        });
+
+        hls.on(Hls.Events.LEVEL_LOADED, () => {
+          if (!cancelled) setPreparing(false);
+        });
+
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (cancelled || !data) return;
+          console.warn("QuantXDrive HLS error", data.type, data.details, data.fatal);
+          if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            setPreparing(true);
+            try { hls.startLoad(); } catch {}
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            try { hls.recoverMediaError(); return; } catch {}
+          }
+          setPreparing(false);
+          setError("HLS playback could not be started. Retrying…");
+          try { hls.destroy(); } catch {}
+          hlsRef.current = null;
+          hlsStartedRef.current = false;
+        });
+
+        hls.loadSource(src);
+        hls.attachMedia(video);
+        return;
+      }
+
+      // Safari/iOS and other browsers without MSE can use native HLS.
       if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = src;
         video.addEventListener("loadedmetadata", () => {
@@ -96,71 +158,10 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         return;
       }
 
-      if (!Hls.isSupported()) {
-        hlsStartedRef.current = false;
-        setPreparing(false);
-        setError("This browser cannot play HLS video.");
-        directPlay();
-        return;
-      }
-
-      const hls = new Hls({
-        enableWorker: true,
-        capLevelToPlayerSize: true,
-        startLevel: 0,
-        abrEwmaDefaultEstimate: 120000,
-        abrBandWidthFactor: 0.8,
-        abrBandWidthUpFactor: 0.7,
-        maxBufferLength: 8,
-        maxMaxBufferLength: 20,
-        backBufferLength: 10,
-        fragLoadingMaxRetry: 6,
-        manifestLoadingMaxRetry: 6,
-        levelLoadingMaxRetry: 6,
-        manifestLoadingRetryDelay: 1000,
-        levelLoadingRetryDelay: 1000,
-        fragLoadingRetryDelay: 500,
-      });
-      hlsRef.current = hls;
-
-      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
-        if (cancelled) return;
-        setLevels(data.levels || []);
-        setPreparing(false);
-        setError("");
-        const restore = () => {
-          if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
-          if (wasPlaying || autoPlay) video.play().catch(() => {});
-        };
-        if (video.readyState >= 1) restore();
-        else video.addEventListener("loadedmetadata", restore, { once: true });
-      });
-
-      hls.on(Hls.Events.LEVEL_LOADED, () => {
-        if (!cancelled) setPreparing(false);
-      });
-
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        if (cancelled || !data) return;
-        console.warn("QuantXDrive HLS error", data.type, data.details, data.fatal);
-        if (!data.fatal) return;
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          setPreparing(true);
-          try { hls.startLoad(); } catch {}
-          return;
-        }
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          try { hls.recoverMediaError(); return; } catch {}
-        }
-        setPreparing(false);
-        setError("HLS playback could not be started. Retrying…");
-        try { hls.destroy(); } catch {}
-        hlsRef.current = null;
-        hlsStartedRef.current = false;
-      });
-
-      hls.loadSource(src);
-      hls.attachMedia(video);
+      hlsStartedRef.current = false;
+      setPreparing(false);
+      setError("This browser cannot play HLS video.");
+      directPlay();
     };
 
     const pollStatus = async () => {
@@ -171,7 +172,6 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
           const d = await r.json();
           const count = Array.isArray(d.qualities) ? d.qualities.length : 0;
           const ready = !!d.ready || count > 0;
-          lastReadyRef.current = ready;
           setPreparing(!!d.preparing && count < 3);
           if (!hlsStartedRef.current && ready) {
             await startHls(count || 1);
@@ -189,14 +189,12 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
 
     hlsStartedRef.current = false;
     qualityCountRef.current = 0;
-    lastReadyRef.current = false;
     setLevels([]);
     setLevel(-1);
     setPreparing(true);
     setError("");
 
-    // Keep the direct source as an immediate fallback, but never depend on an
-    // external CDN for HLS. HLS.js is bundled with the Vercel build.
+    // Keep direct MP4 as the immediate fallback while HLS preparation is checked.
     directPlay();
     pollStatus();
 
