@@ -16,15 +16,9 @@ PREPARE_TASKS = {}
 PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
 
-# Keep interactive first-segment generation independent from the slower
-# quality-upgrade work. The small v0 limit prevents an unbounded FFmpeg storm,
-# while allowing a new video to start even when another video's upgrades run.
 HLS_V0_SEMAPHORE = asyncio.Semaphore(2)
 HLS_UPGRADE_SEMAPHORE = asyncio.Semaphore(1)
 
-# FFmpeg is deliberately given a seekable HTTP view of Telegram rather than a
-# pipe or a local copy of the complete source. This lets the MP4/MOV demuxer
-# request tail metadata and other byte ranges as needed.
 HLS_PROXY_SECRET = os.getenv("HLS_PROXY_SECRET") or secrets.token_urlsafe(32)
 HLS_PROXY_PORT = int(os.getenv("PORT", "8000"))
 TG_CHUNK_SIZE = 1024 * 1024
@@ -58,7 +52,6 @@ def _task_done(file_id: int, task: asyncio.Task):
         print(f"❌ HLS preparation failed for file {file_id}: {exc}", flush=True)
 
 async def _start_prepare(file_id: int):
-    """Start HLS preparation without blocking the direct media request."""
     async with PREPARE_LOCKS_GUARD:
         if _master_path(file_id).exists():
             PREPARE_FAILED.discard(file_id)
@@ -97,6 +90,9 @@ async def _encode_variant(source_url: str, source_label: str, out_dir: Path, var
         "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
         "-seekable", "1",
         "-multiple_requests", "1",
+        "-request_size", str(8 * 1024 * 1024),
+        "-initial_request_size", str(2 * 1024 * 1024),
+        "-short_seek_size", str(8 * 1024 * 1024),
         "-i", source_url,
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "ultrafast", "-profile:v", "main",
@@ -132,9 +128,6 @@ async def _encode_variant(source_url: str, source_label: str, out_dir: Path, var
     return None, playlist
 
 async def _encode_first_variant(source_url: str, file_id: int, out_dir: Path):
-    # Only the time until the first segment is published is serialized. The
-    # FFmpeg process remains alive afterwards, but a new file can claim the
-    # second v0 slot immediately instead of waiting for this file's full encode.
     async with HLS_V0_SEMAPHORE:
         return await _encode_variant(source_url, str(file_id), out_dir, VARIANTS[0], live=True)
 
@@ -155,17 +148,11 @@ async def prepare_hls(file_id: int):
         out_dir = _dir(file_id)
         shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
-        source_url = (
-            f"http://127.0.0.1:{HLS_PROXY_PORT}/internal/hls-source/"
-            f"{file_id}?key={HLS_PROXY_SECRET}"
-        )
+        source_url = f"http://127.0.0.1:{HLS_PROXY_PORT}/internal/hls-source/{file_id}?key={HLS_PROXY_SECRET}"
         try:
             proc0, _ = await _encode_first_variant(source_url, file_id, out_dir)
             _write_master(out_dir, ["v0"])
             print(f"⚡ HLS low-bandwidth stream ready for file {file_id}", flush=True)
-
-            # Quality upgrades are deliberately separate from first-segment
-            # generation, so they cannot block another video's startup.
             async with HLS_UPGRADE_SEMAPHORE:
                 if proc0:
                     _, err = await proc0.communicate()
@@ -284,9 +271,11 @@ def register_hls_routes(app):
         master = _master_path(file_id)
         if not master.exists() and file_id not in PREPARE_FAILED:
             task = PREPARE_TASKS.get(file_id)
-            if not task or task.done(): await _start_prepare(file_id)
+            if not task or task.done():
+                await _start_prepare(file_id)
         task = PREPARE_TASKS.get(file_id)
         available = [name for name, *_ in VARIANTS if (_dir(file_id) / name / "playlist.m3u8").exists()]
         ready = master.exists()
-        if ready: PREPARE_FAILED.discard(file_id)
+        if ready:
+            PREPARE_FAILED.discard(file_id)
         return {"ready": ready, "preparing": bool(task and not task.done()), "failed": file_id in PREPARE_FAILED and not ready, "qualities": available}
