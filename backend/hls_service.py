@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import shutil
 import secrets
 from pathlib import Path
 from fastapi import HTTPException, Request
@@ -15,7 +14,7 @@ PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
 FFMPEG_LOCK = asyncio.Lock()
 FFMPEG_PATH = None
-HLS_ENCODE_SEMAPHORE = asyncio.Semaphore(2)
+HLS_ENCODE_SEMAPHORE = asyncio.Semaphore(1)
 HLS_PROXY_SECRET = os.getenv("HLS_PROXY_SECRET") or secrets.token_urlsafe(32)
 HLS_PROXY_PORT = int(os.getenv("PORT", "8000"))
 TG_CHUNK_SIZE = 1024 * 1024
@@ -61,65 +60,90 @@ async def _bootstrap_ffmpeg() -> None:
     proc = await asyncio.create_subprocess_exec("bash", str(FFMPEG_BOOTSTRAP), cwd=str(FFMPEG_BOOTSTRAP.parent), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     output, _ = await proc.communicate()
     text = output.decode("utf-8", "ignore").strip()
-    if text: print(text, flush=True)
-    if proc.returncode != 0: raise RuntimeError(f"FFmpeg bootstrap failed with exit code {proc.returncode}")
+    if text:
+        print(text, flush=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg bootstrap failed with exit code {proc.returncode}")
 
 
 async def _ensure_ffmpeg() -> str:
     global FFMPEG_PATH
-    if FFMPEG_PATH: return FFMPEG_PATH
+    if FFMPEG_PATH:
+        return FFMPEG_PATH
     async with FFMPEG_LOCK:
-        if FFMPEG_PATH: return FFMPEG_PATH
+        if FFMPEG_PATH:
+            return FFMPEG_PATH
         bundled = str(FFMPEG_BINARY)
-        if not FFMPEG_BINARY.is_file() or not os.access(bundled, os.X_OK): await _bootstrap_ffmpeg()
-        if not FFMPEG_BINARY.is_file(): raise RuntimeError(f"Bundled Render FFmpeg not found: {bundled}")
-        if not os.access(bundled, os.X_OK): raise RuntimeError(f"Bundled Render FFmpeg is not executable: {bundled}")
-        if not await _ffmpeg_supports_range_options(bundled): raise RuntimeError(f"Bundled Render FFmpeg lacks required HTTP range options: {bundled}")
+        if not FFMPEG_BINARY.is_file() or not os.access(bundled, os.X_OK):
+            await _bootstrap_ffmpeg()
+        if not FFMPEG_BINARY.is_file():
+            raise RuntimeError(f"Bundled Render FFmpeg not found: {bundled}")
+        if not os.access(bundled, os.X_OK):
+            raise RuntimeError(f"Bundled Render FFmpeg is not executable: {bundled}")
+        if not await _ffmpeg_supports_range_options(bundled):
+            raise RuntimeError(f"Bundled Render FFmpeg lacks required HTTP range options: {bundled}")
         FFMPEG_PATH = bundled
         print(f"🎬 Using bundled Render FFmpeg: {FFMPEG_PATH}", flush=True)
         return FFMPEG_PATH
 
 
-def _dir(file_id: int) -> Path: return HLS_ROOT / str(file_id)
-def _master_path(file_id: int) -> Path: return _dir(file_id) / "master.m3u8"
-def _task_key(file_id: int, variant: str): return (file_id, variant)
+def _dir(file_id: int) -> Path:
+    return HLS_ROOT / str(file_id)
+
+
+def _master_path(file_id: int) -> Path:
+    return _dir(file_id) / "master.m3u8"
+
+
+def _task_key(file_id: int, variant: str):
+    return file_id, variant
 
 
 def _available_variants(file_id: int):
     root = _dir(file_id)
-    return [x for x in VARIANTS if (root / x[0] / "playlist.m3u8").is_file()]
+    return [x for x in VARIANTS if (root / x[0] / "playlist.m3u8").is_file() and any((root / x[0]).glob("seg_*.ts"))]
 
 
 def _master_is_valid(file_id: int) -> bool:
     master = _master_path(file_id)
     available = _available_variants(file_id)
-    if not master.is_file() or not available: return False
-    try: text = master.read_text(encoding="utf-8")
-    except Exception: return False
+    if not master.is_file() or not available:
+        return False
+    try:
+        text = master.read_text(encoding="utf-8")
+    except Exception:
+        return False
     return "#EXTM3U" in text and all(f"{x[0]}/playlist.m3u8" in text for x in available)
 
 
 def _task_done(key, task: asyncio.Task):
     PREPARE_TASKS.pop(key, None)
     try:
-        task.result(); PREPARE_FAILED.discard(key)
+        task.result()
+        PREPARE_FAILED.discard(key)
     except asyncio.CancelledError:
-        PREPARE_FAILED.add(key); print(f"⚠️ HLS preparation cancelled for file {key[0]} quality {key[1]}", flush=True)
+        PREPARE_FAILED.add(key)
+        print(f"⚠️ HLS preparation cancelled for file {key[0]} quality {key[1]}", flush=True)
     except Exception as exc:
-        PREPARE_FAILED.add(key); print(f"❌ HLS preparation failed for file {key[0]} quality {key[1]}: {exc}", flush=True)
+        PREPARE_FAILED.add(key)
+        print(f"❌ HLS preparation failed for file {key[0]} quality {key[1]}: {exc}", flush=True)
 
 
 async def _start_variant(file_id: int, variant_name: str):
     file = await main.db.get_file_by_id(file_id)
-    if not file: raise HTTPException(status_code=404, detail="File not found")
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
     supported = {x[0] for x in _supported_variants(file)}
-    if variant_name not in supported: raise HTTPException(status_code=400, detail="Requested quality is higher than the source video")
+    if variant_name not in supported:
+        raise HTTPException(status_code=400, detail="Requested quality is higher than the source video")
     root = _dir(file_id) / variant_name
-    if (root / "playlist.m3u8").is_file() and list(root.glob("seg_*.ts")): return True
+    if (root / "playlist.m3u8").is_file() and any(root.glob("seg_*.ts")):
+        return True
     key = _task_key(file_id, variant_name)
     async with PREPARE_LOCKS_GUARD:
         old = PREPARE_TASKS.get(key)
-        if old and not old.done(): return False
+        if old and not old.done():
+            return False
         PREPARE_FAILED.discard(key)
         task = asyncio.create_task(_prepare_variant(file_id, file, variant_name))
         PREPARE_TASKS[key] = task
@@ -130,15 +154,18 @@ async def _start_variant(file_id: int, variant_name: str):
 
 def _bitrate_to_int(value: str) -> int:
     text = str(value).strip().lower()
-    if text.endswith("k"): return int(float(text[:-1]) * 1000)
-    if text.endswith("m"): return int(float(text[:-1]) * 1000000)
+    if text.endswith("k"):
+        return int(float(text[:-1]) * 1000)
+    if text.endswith("m"):
+        return int(float(text[:-1]) * 1000000)
     return int(float(text))
 
 
 async def _write_master_for_file(file_id: int):
     out_dir = _dir(file_id)
     available = _available_variants(file_id)
-    if not available: return
+    if not available:
+        return
     lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
     for name, width, height, _, maxrate, _, audio in available:
         bandwidth = _bitrate_to_int(maxrate) + _bitrate_to_int(audio)
@@ -150,51 +177,74 @@ async def _write_master_for_file(file_id: int):
 
 async def _prepare_variant(file_id: int, file: dict, variant_name: str):
     variant = QUALITY_BY_ID[variant_name]
-    out_dir = _dir(file_id); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _dir(file_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
     source_url = f"http://127.0.0.1:{HLS_PROXY_PORT}/internal/hls-source/{file_id}?key={HLS_PROXY_SECRET}"
-    if variant_name == "v0":
-        async with HLS_ENCODE_SEMAPHORE:
-            proc, playlist = await _encode_variant(source_url, str(file_id), out_dir, variant, live=True)
-        if not playlist.exists(): raise RuntimeError("ffmpeg v0 produced no playlist")
+
+    async with HLS_ENCODE_SEMAPHORE:
+        proc, playlist = await _encode_variant(source_url, str(file_id), out_dir, variant, live=True)
+        if not playlist.exists() or not any((out_dir / variant_name).glob("seg_*.ts")):
+            raise RuntimeError(f"ffmpeg {variant_name} produced no playable HLS segment")
         await _write_master_for_file(file_id)
-        print(f"⚡ HLS low-bandwidth stream ready for file {file_id}", flush=True)
+        print(f"⚡ HLS first segment ready for {variant_name} on file {file_id}", flush=True)
         if proc:
             _, err = await proc.communicate()
-            if proc.returncode != 0: raise RuntimeError(f"ffmpeg v0 failed ({proc.returncode}): {err.decode('utf-8', 'ignore')[-10000:]}")
-    else:
-        async with HLS_ENCODE_SEMAPHORE:
-            _, playlist = await _encode_variant(source_url, str(file_id), out_dir, variant, live=False)
-        if not playlist.exists(): raise RuntimeError(f"ffmpeg {variant_name} produced no playlist")
-        await _write_master_for_file(file_id)
-        print(f"⚡ HLS {variant_name} available for file {file_id}", flush=True)
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg {variant_name} failed ({proc.returncode}): {err.decode('utf-8', 'ignore')[-10000:]}")
+            await _write_master_for_file(file_id)
+            print(f"⚡ HLS {variant_name} completed for file {file_id}", flush=True)
 
 
 async def _encode_variant(source_url: str, source_label: str, out_dir: Path, variant, live=False):
     name, width, height, video_bitrate, maxrate, bufsize, audio_bitrate = variant
-    variant_dir = out_dir / name; variant_dir.mkdir(parents=True, exist_ok=True)
+    variant_dir = out_dir / name
+    variant_dir.mkdir(parents=True, exist_ok=True)
     playlist = variant_dir / "playlist.m3u8"
     segment_pattern = variant_dir / "seg_%05d.ts"
     ffmpeg = await _ensure_ffmpeg()
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1", "-seekable", "1", "-multiple_requests", "1", "-request_size", "4194304", "-initial_request_size", "2097152", "-short_seek_size", "4194304", "-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_streamed", "1", "-reconnect_max_retries", "20", "-reconnect_delay_max", "2", "-rw_timeout", "60000000", "-i", source_url, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "ultrafast", "-profile:v", "main", "-pix_fmt", "yuv420p", "-sc_threshold", "0", "-r", "24", "-g", "48", "-keyint_min", "48", "-force_key_frames", "expr:gte(t,n_forced*2)", "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2", "-b:v", video_bitrate, "-maxrate", maxrate, "-bufsize", bufsize, "-c:a", "aac", "-ar", "44100", "-b:a", audio_bitrate, "-ac", "2", "-f", "hls", "-hls_time", "2", "-hls_list_size", "0", "-hls_flags", "independent_segments", "-hls_segment_filename", str(segment_pattern), "-hls_playlist_type", "vod", str(playlist)]
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "warning",
+        "-threads", "0", "-filter_threads", "0", "-filter_complex_threads", "0",
+        "-seekable", "1", "-multiple_requests", "1", "-request_size", "4194304",
+        "-initial_request_size", "2097152", "-short_seek_size", "4194304",
+        "-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_streamed", "1",
+        "-reconnect_max_retries", "20", "-reconnect_delay_max", "2", "-rw_timeout", "60000000",
+        "-i", source_url, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+        "-preset", "ultrafast", "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-sc_threshold", "0", "-r", "24", "-g", "48", "-keyint_min", "48",
+        "-force_key_frames", "expr:gte(t,n_forced*2)",
+        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+        "-b:v", video_bitrate, "-maxrate", maxrate, "-bufsize", bufsize,
+        "-c:a", "aac", "-ar", "44100", "-b:a", audio_bitrate, "-ac", "2",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", "0",
+        "-hls_flags", "independent_segments", "-hls_segment_filename", str(segment_pattern),
+        "-hls_playlist_type", "event", str(playlist),
+    ]
     print(f"🎞️ HLS encoding {name} from seekable Telegram HTTP source {source_label}", flush=True)
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     if live:
-        for _ in range(240):
-            if playlist.exists() and list(variant_dir.glob("seg_*.ts")):
-                print(f"⚡ HLS first segment ready for {name}", flush=True); return proc, playlist
-            if proc.returncode is not None: break
+        for _ in range(480):
+            if playlist.exists() and any(variant_dir.glob("seg_*.ts")):
+                print(f"⚡ HLS first segment ready for {name}", flush=True)
+                return proc, playlist
+            if proc.returncode is not None:
+                break
             await asyncio.sleep(0.25)
     _, stderr = await proc.communicate()
-    if proc.returncode != 0: raise RuntimeError(f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8', 'ignore')[-10000:]}")
-    if not playlist.exists(): raise RuntimeError(f"ffmpeg {name} produced no playlist")
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8', 'ignore')[-10000:]}")
+    if not playlist.exists():
+        raise RuntimeError(f"ffmpeg {name} produced no playlist")
     return None, playlist
 
 
 async def prepare_hls(file_id: int):
     file = await main.db.get_file_by_id(file_id)
-    if not file: raise HTTPException(status_code=404, detail="File not found")
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
     mime = file.get("mime") or main.get_mime(file.get("filename", ""))
-    if not mime.startswith("video/"): raise HTTPException(status_code=400, detail="HLS is available only for videos")
+    if not mime.startswith("video/"):
+        raise HTTPException(status_code=400, detail="HLS is available only for videos")
     _dir(file_id).mkdir(parents=True, exist_ok=True)
     await _start_variant(file_id, "v0")
     return file
@@ -206,42 +256,60 @@ def _hls_response(path: Path, media_type: str) -> Response:
 
 
 def _parse_single_range(range_header: str, size: int):
-    if not range_header or not range_header.startswith("bytes="): return None
+    if not range_header or not range_header.startswith("bytes="):
+        return None
     value = range_header[6:].strip()
-    if not value or "," in value: raise HTTPException(status_code=416, detail="Only a single byte range is supported")
+    if not value or "," in value:
+        raise HTTPException(status_code=416, detail="Only a single byte range is supported")
     left, _, right = value.partition("-")
     try:
         if not left:
             suffix = int(right)
-            if suffix <= 0: raise ValueError
-            start = max(0, size - suffix); end = size - 1
+            if suffix <= 0:
+                raise ValueError
+            start = max(0, size - suffix)
+            end = size - 1
         else:
-            start = int(left); end = int(right) if right else size - 1
-    except (TypeError, ValueError): raise HTTPException(status_code=416, detail="Invalid byte range")
-    if start < 0 or start >= size or end < start: raise HTTPException(status_code=416, detail="Range not satisfiable")
+            start = int(left)
+            end = int(right) if right else size - 1
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=416, detail="Invalid byte range")
+    if start < 0 or start >= size or end < start:
+        raise HTTPException(status_code=416, detail="Range not satisfiable")
     return start, min(end, size - 1)
 
 
 async def _proxy_range_response(file: dict, request: Request, head_only: bool = False):
     file_size = int(file.get("size") or 0)
-    if file_size <= 0: raise HTTPException(status_code=416, detail="Unknown source size")
+    if file_size <= 0:
+        raise HTTPException(status_code=416, detail="Unknown source size")
     range_header = request.headers.get("range") or request.headers.get("Range")
     parsed = _parse_single_range(range_header, file_size) if range_header else None
     start, end = parsed if parsed else (0, file_size - 1)
     length = end - start + 1
     mime = file.get("mime") or main.get_mime(file.get("filename", ""))
     headers = {"Content-Type": mime, "Accept-Ranges": "bytes", "Content-Length": str(length), "Content-Range": f"bytes {start}-{end}/{file_size}" if parsed else f"bytes 0-{file_size - 1}/{file_size}", "Cache-Control": "no-store"}
-    if head_only: return Response(status_code=206 if parsed else 200, headers=headers, media_type=mime)
-    chunk_offset = start // TG_CHUNK_SIZE; first_cut = start - chunk_offset * TG_CHUNK_SIZE; last_cut = (end % TG_CHUNK_SIZE) + 1; chunk_count = ((end // TG_CHUNK_SIZE) - chunk_offset) + 1
+    if head_only:
+        return Response(status_code=206 if parsed else 200, headers=headers, media_type=mime)
+    chunk_offset = start // TG_CHUNK_SIZE
+    first_cut = start - chunk_offset * TG_CHUNK_SIZE
+    last_cut = (end % TG_CHUNK_SIZE) + 1
+    chunk_count = ((end // TG_CHUNK_SIZE) - chunk_offset) + 1
     async def generator():
         current = 0
         async for chunk in main._stream_media_with_refresh(file, offset=chunk_offset, limit=chunk_count):
-            if not chunk: break
-            if chunk_count == 1: piece = chunk[first_cut:last_cut]
-            elif current == 0: piece = chunk[first_cut:]
-            elif current == chunk_count - 1: piece = chunk[:last_cut]
-            else: piece = chunk
-            if piece: yield piece
+            if not chunk:
+                break
+            if chunk_count == 1:
+                piece = chunk[first_cut:last_cut]
+            elif current == 0:
+                piece = chunk[first_cut:]
+            elif current == chunk_count - 1:
+                piece = chunk[:last_cut]
+            else:
+                piece = chunk
+            if piece:
+                yield piece
             current += 1
     status = 206 if parsed else 200
     print(f"🔎 HLS proxy file={file.get('id')} range={start}-{end} len={length} telegram_chunks={chunk_count}", flush=True)
@@ -252,46 +320,59 @@ def register_hls_routes(app):
     @app.api_route("/internal/hls-source/{file_id}", methods=["GET", "HEAD"])
     async def hls_source_proxy(file_id: int, request: Request, key: str = ""):
         client_host = request.client.host if request.client else ""
-        if client_host not in {"127.0.0.1", "::1", "localhost"} or not secrets.compare_digest(key, HLS_PROXY_SECRET): raise HTTPException(status_code=404, detail="Not found")
+        if client_host not in {"127.0.0.1", "::1", "localhost"} or not secrets.compare_digest(key, HLS_PROXY_SECRET):
+            raise HTTPException(status_code=404, detail="Not found")
         file = await main.db.get_file_by_id(file_id)
-        if not file: raise HTTPException(status_code=404, detail="File not found")
-        if not (file.get("mime") or main.get_mime(file.get("filename", ""))).startswith("video/"): raise HTTPException(status_code=400, detail="Source is not a video")
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        if not (file.get("mime") or main.get_mime(file.get("filename", ""))).startswith("video/"):
+            raise HTTPException(status_code=400, detail="Source is not a video")
         return await _proxy_range_response(file, request, head_only=request.method == "HEAD")
 
     @app.get("/api/hls/{token}/{file_id}/master.m3u8")
     async def hls_master(token: str, file_id: int):
-        if not main.verify_jwt(token): raise HTTPException(status_code=401, detail="Invalid token")
+        if not main.verify_jwt(token):
+            raise HTTPException(status_code=401, detail="Invalid token")
         file = await main.db.get_file_by_id(file_id)
-        if not file: raise HTTPException(status_code=404, detail="File not found")
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
         await prepare_hls(file_id)
         master = _master_path(file_id)
-        if not master.is_file(): raise HTTPException(status_code=425, detail="HLS is still preparing")
+        if not master.is_file():
+            raise HTTPException(status_code=425, detail="HLS is still preparing")
         return _hls_response(master, "application/vnd.apple.mpegurl")
 
     @app.get("/api/hls/{token}/{file_id}/{variant}/{asset}")
     async def hls_asset(token: str, file_id: int, variant: str, asset: str):
-        if not main.verify_jwt(token): raise HTTPException(status_code=401, detail="Invalid token")
-        if variant not in QUALITY_BY_ID or "/" in asset or "\\" in asset or asset.startswith("."): raise HTTPException(status_code=404, detail="HLS asset not found")
+        if not main.verify_jwt(token):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if variant not in QUALITY_BY_ID or "/" in asset or "\\" in asset or asset.startswith("."):
+            raise HTTPException(status_code=404, detail="HLS asset not found")
         file = await main.db.get_file_by_id(file_id)
-        if not file: raise HTTPException(status_code=404, detail="File not found")
-        if variant not in {x[0] for x in _supported_variants(file)}: raise HTTPException(status_code=404, detail="HLS quality not supported for this source")
-        if not _master_is_valid(file_id):
-            await prepare_hls(file_id); raise HTTPException(status_code=425, detail="HLS is still preparing")
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        if variant not in {x[0] for x in _supported_variants(file)}:
+            raise HTTPException(status_code=404, detail="HLS quality not supported for this source")
         candidate = _dir(file_id) / variant / asset
         if not candidate.exists() or not candidate.is_file():
-            await _start_variant(file_id, variant); raise HTTPException(status_code=425, detail="Quality is still preparing")
+            await _start_variant(file_id, variant)
+            raise HTTPException(status_code=425, detail="Quality is still preparing")
         media = "application/vnd.apple.mpegurl" if candidate.suffix == ".m3u8" else "video/mp2t"
         return _hls_response(candidate, media)
 
     @app.get("/api/hls/{token}/{file_id}/status")
     async def hls_status(token: str, file_id: int, quality: str = ""):
-        if not main.verify_jwt(token): raise HTTPException(status_code=401, detail="Invalid token")
+        if not main.verify_jwt(token):
+            raise HTTPException(status_code=401, detail="Invalid token")
         file = await main.db.get_file_by_id(file_id)
-        if not file: raise HTTPException(status_code=404, detail="File not found")
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
         supported = [x[0] for x in _supported_variants(file)]
-        if "v0" in supported: await _start_variant(file_id, "v0")
+        if "v0" in supported:
+            await _start_variant(file_id, "v0")
         if quality:
-            if quality not in supported: raise HTTPException(status_code=400, detail="Requested quality is higher than the source video")
+            if quality not in supported:
+                raise HTTPException(status_code=400, detail="Requested quality is higher than the source video")
             await _start_variant(file_id, quality)
         available = [x[0] for x in _available_variants(file_id) if x[0] in supported]
         task_keys = [_task_key(file_id, q) for q in supported]
