@@ -9,58 +9,26 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Patch AdaptiveVideo
+      - name: Fix HLS status bootstrap
         run: |
           python - <<'PY'
           from pathlib import Path
-          p=Path('frontend/src/AdaptiveVideo.jsx')
+          p=Path('backend/hls_service.py')
           s=p.read_text()
-          if 'const pollRef = useRef(null);' in s:
-              print('Already patched')
-              raise SystemExit(0)
-          s=s.replace('const [error, setError] = useState("");', 'const [error, setError] = useState("");\n  const pollRef = useRef(null);\n  const hlsStartedRef = useRef(false);', 1)
-          start=s.index('  useEffect(() => {', s.index('export default function AdaptiveVideo'))
-          end=s.index('\n\n  const chooseLevel', start)
-          effect=r'''  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !fallbackSrc) return undefined;
-    let cancelled = false;
-    const stopPoll=()=>{if(pollRef.current){clearTimeout(pollRef.current);pollRef.current=null;}};
-    const destroyHls=()=>{if(hlsRef.current){hlsRef.current.destroy();hlsRef.current=null;}};
-    const directPlay=()=>{if(cancelled)return;destroyHls();video.src=fallbackSrc;video.load();if(autoPlay)video.play().catch(()=>{});};
-    const startHls=async()=>{
-      if(cancelled||hlsStartedRef.current||!src)return;
-      hlsStartedRef.current=true;stopPoll();
-      const resumeAt=Number.isFinite(video.currentTime)?video.currentTime:0;
-      const wasPlaying=!video.paused;
-      try{
-        const Hls=await loadHls(); if(cancelled||!Hls)return;
-        if(video.canPlayType('application/vnd.apple.mpegurl')){
-          video.src=src;video.addEventListener('loadedmetadata',()=>{if(resumeAt>0){try{video.currentTime=resumeAt}catch{}}if(wasPlaying||autoPlay)video.play().catch(()=>{});},{once:true});return;
-        }
-        if(!Hls.isSupported())return;
-        const hls=new Hls({enableWorker:true,capLevelToPlayerSize:true,startLevel:0,abrEwmaDefaultEstimate:120000,abrBandWidthFactor:.8,abrBandWidthUpFactor:.7,maxBufferLength:8,maxMaxBufferLength:20,backBufferLength:10,fragLoadingMaxRetry:4,manifestLoadingMaxRetry:3,levelLoadingMaxRetry:4});
-        hlsRef.current=hls;
-        hls.on(Hls.Events.MANIFEST_PARSED,(_,data)=>{if(cancelled)return;setLevels(data.levels||[]);const restore=()=>{if(resumeAt>0){try{video.currentTime=resumeAt}catch{}}if(wasPlaying||autoPlay)video.play().catch(()=>{});};if(video.readyState>=1)restore();else video.addEventListener('loadedmetadata',restore,{once:true});});
-        hls.on(Hls.Events.ERROR,(_,data)=>{if(cancelled||!data?.fatal)return;if(data.type===Hls.ErrorTypes.MEDIA_ERROR){try{hls.recoverMediaError();return}catch{}}hlsStartedRef.current=false;setLevels([]);setLevel(-1);directPlay();});
-        hls.loadSource(src);hls.attachMedia(video);
-      }catch{if(!cancelled){hlsStartedRef.current=false;directPlay();}}
-    };
-    const pollStatus=async()=>{
-      if(cancelled||hlsStartedRef.current||!src)return;
-      try{const r=await fetch(src.replace(/\/master\.m3u8$/,'/status'),{cache:'no-store'});if(r.ok){const d=await r.json();if(d.ready){await startHls();return;}setPreparing(!!d.preparing);}}catch{}
-      if(!cancelled&&!hlsStartedRef.current)pollRef.current=setTimeout(pollStatus,3000);
-    };
-    hlsStartedRef.current=false;setLevels([]);setLevel(-1);setPreparing(false);setError('');
-    directPlay();pollStatus();
-    return()=>{cancelled=true;stopPoll();destroyHls();video.removeAttribute('src');video.load();};
-  },[src,fallbackSrc,autoPlay]);'''
-          p.write_text(s[:start]+effect+s[end:])
+          old='''        master = _master_path(file_id)\n        task = PREPARE_TASKS.get(file_id)\n        return {\n            "ready": master.exists(),\n            "preparing": bool(task and not task.done()),\n            "failed": bool(task and task.done() and not task.cancelled() and task.exception()),\n        }'''
+          new='''        master = _master_path(file_id)\n        if master.exists():\n            return {"ready": True, "preparing": False, "failed": False}\n\n        # Status polling must also bootstrap preparation. After a Render restart\n        # PREPARE_TASKS is empty, so waiting for the master alone would deadlock.\n        task = PREPARE_TASKS.get(file_id)\n        if not task or task.done():\n            await _start_prepare(file_id)\n            task = PREPARE_TASKS.get(file_id)\n\n        return {\n            "ready": master.exists(),\n            "preparing": bool(task and not task.done()),\n            "failed": bool(task and task.done() and not task.cancelled() and task.exception()),\n        }'''
+          if old not in s:
+              raise SystemExit('Expected hls_status block not found')
+          p.write_text(s.replace(old,new,1))
           PY
-      - name: Commit
+      - name: Stop this one-time patch workflow
+        run: git rm .github/workflows/instant-video-playback.yml
+      - name: Commit and push
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add frontend/src/AdaptiveVideo.jsx
-          git diff --cached --quiet || git commit -m 'fix: instant video playback with background HLS'
+          git add backend/hls_service.py
+          git commit -m 'fix: bootstrap HLS preparation from status endpoint'
+          git add -A
+          git commit -m 'chore: remove one-time playback patch workflow' || true
           git push
