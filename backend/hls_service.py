@@ -91,8 +91,6 @@ async def _encode_variant(source_url: str, source_label: str, out_dir: Path, var
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
         "-seekable", "1",
-        "-request_size", str(4 * 1024 * 1024),
-        "-initial_request_size", str(2 * 1024 * 1024),
         "-multiple_requests", "1",
         "-i", source_url,
         "-map", "0:v:0", "-map", "0:a:0?",
