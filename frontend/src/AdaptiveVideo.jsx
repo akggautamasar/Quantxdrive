@@ -1,26 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-
-const HLS_CDN = "https://cdn.jsdelivr.net/npm/hls.js@1.7.2/dist/hls.min.js";
-
-function loadHls() {
-  if (window.Hls) return Promise.resolve(window.Hls);
-  if (window.__quantxHlsPromise) return window.__quantxHlsPromise;
-  window.__quantxHlsPromise = new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src="${HLS_CDN}"]`);
-    if (existing) {
-      existing.addEventListener("load", () => resolve(window.Hls), { once: true });
-      existing.addEventListener("error", reject, { once: true });
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = HLS_CDN;
-    script.async = true;
-    script.onload = () => resolve(window.Hls);
-    script.onerror = reject;
-    document.head.appendChild(script);
-  });
-  return window.__quantxHlsPromise;
-}
+import Hls from "hls.js";
 
 export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, style, className, ...props }) {
   const videoRef = useRef(null);
@@ -32,23 +11,27 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
   const pollRef = useRef(null);
   const hlsStartedRef = useRef(false);
   const qualityCountRef = useRef(0);
+  const lastReadyRef = useRef(false);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !fallbackSrc) return undefined;
     let cancelled = false;
+
     const stopPoll = () => {
       if (pollRef.current) {
         clearTimeout(pollRef.current);
         pollRef.current = null;
       }
     };
+
     const destroyHls = () => {
       if (hlsRef.current) {
-        hlsRef.current.destroy();
+        try { hlsRef.current.destroy(); } catch {}
         hlsRef.current = null;
       }
     };
+
     const directPlay = () => {
       if (cancelled) return;
       destroyHls();
@@ -82,8 +65,6 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         } catch {}
       }
 
-      // Safari/native HLS has no hls.js instance. Changing the query string
-      // forces a fresh master request while preserving the current position.
       video.src = nextSrc;
       video.load();
       const restore = () => {
@@ -98,69 +79,88 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
     const startHls = async initialCount => {
       if (cancelled || hlsStartedRef.current || !src) return;
       hlsStartedRef.current = true;
-      qualityCountRef.current = initialCount || 1;
+      qualityCountRef.current = Math.max(1, initialCount || 1);
       setPreparing(true);
+      setError("");
       const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       const wasPlaying = !video.paused;
-      try {
-        const Hls = await loadHls();
-        if (cancelled || !Hls) return;
-        if (video.canPlayType("application/vnd.apple.mpegurl")) {
-          video.src = src;
-          video.addEventListener("loadedmetadata", () => {
-            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
-            if (wasPlaying || autoPlay) video.play().catch(() => {});
-          }, { once: true });
-          return;
-        }
-        if (!Hls.isSupported()) {
-          directPlay();
-          return;
-        }
-        const hls = new Hls({
-          enableWorker: true,
-          capLevelToPlayerSize: true,
-          startLevel: 0,
-          abrEwmaDefaultEstimate: 120000,
-          abrBandWidthFactor: 0.8,
-          abrBandWidthUpFactor: 0.7,
-          maxBufferLength: 8,
-          maxMaxBufferLength: 20,
-          backBufferLength: 10,
-          fragLoadingMaxRetry: 4,
-          manifestLoadingMaxRetry: 3,
-          levelLoadingMaxRetry: 4,
-        });
-        hlsRef.current = hls;
-        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = src;
+        video.addEventListener("loadedmetadata", () => {
           if (cancelled) return;
-          setLevels(data.levels || []);
-          const restore = () => {
-            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
-            if (wasPlaying || autoPlay) video.play().catch(() => {});
-          };
-          if (video.readyState >= 1) restore();
-          else video.addEventListener("loadedmetadata", restore, { once: true });
-        });
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          if (cancelled || !data?.fatal) return;
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            try { hls.recoverMediaError(); return; } catch {}
-          }
-          hlsStartedRef.current = false;
-          qualityCountRef.current = 0;
-          setLevels([]);
-          setLevel(-1);
-          directPlay();
-        });
-        hls.loadSource(src);
-        hls.attachMedia(video);
-      } catch {
-        if (!cancelled) {
-          hlsStartedRef.current = false;
-          directPlay();
-        }
+          if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
+          setPreparing(false);
+          if (wasPlaying || autoPlay) video.play().catch(() => {});
+        }, { once: true });
+        return;
       }
+
+      if (!Hls.isSupported()) {
+        hlsStartedRef.current = false;
+        setPreparing(false);
+        setError("This browser cannot play HLS video.");
+        directPlay();
+        return;
+      }
+
+      const hls = new Hls({
+        enableWorker: true,
+        capLevelToPlayerSize: true,
+        startLevel: 0,
+        abrEwmaDefaultEstimate: 120000,
+        abrBandWidthFactor: 0.8,
+        abrBandWidthUpFactor: 0.7,
+        maxBufferLength: 8,
+        maxMaxBufferLength: 20,
+        backBufferLength: 10,
+        fragLoadingMaxRetry: 6,
+        manifestLoadingMaxRetry: 6,
+        levelLoadingMaxRetry: 6,
+        manifestLoadingRetryDelay: 1000,
+        levelLoadingRetryDelay: 1000,
+        fragLoadingRetryDelay: 500,
+      });
+      hlsRef.current = hls;
+
+      hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        if (cancelled) return;
+        setLevels(data.levels || []);
+        setPreparing(false);
+        setError("");
+        const restore = () => {
+          if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
+          if (wasPlaying || autoPlay) video.play().catch(() => {});
+        };
+        if (video.readyState >= 1) restore();
+        else video.addEventListener("loadedmetadata", restore, { once: true });
+      });
+
+      hls.on(Hls.Events.LEVEL_LOADED, () => {
+        if (!cancelled) setPreparing(false);
+      });
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (cancelled || !data) return;
+        console.warn("QuantXDrive HLS error", data.type, data.details, data.fatal);
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          setPreparing(true);
+          try { hls.startLoad(); } catch {}
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          try { hls.recoverMediaError(); return; } catch {}
+        }
+        setPreparing(false);
+        setError("HLS playback could not be started. Retrying…");
+        try { hls.destroy(); } catch {}
+        hlsRef.current = null;
+        hlsStartedRef.current = false;
+      });
+
+      hls.loadSource(src);
+      hls.attachMedia(video);
     };
 
     const pollStatus = async () => {
@@ -170,27 +170,33 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         if (r.ok) {
           const d = await r.json();
           const count = Array.isArray(d.qualities) ? d.qualities.length : 0;
+          const ready = !!d.ready || count > 0;
+          lastReadyRef.current = ready;
           setPreparing(!!d.preparing && count < 3);
-          if (!hlsStartedRef.current && (d.ready || count > 0)) {
+          if (!hlsStartedRef.current && ready) {
             await startHls(count || 1);
           } else if (hlsStartedRef.current && count > qualityCountRef.current) {
             reloadHlsManifest(count);
           }
-          if (d.failed && !d.ready) setPreparing(false);
+          if (d.failed && !d.ready) {
+            setPreparing(false);
+            setError("Preparing the video stream…");
+          }
         }
       } catch {}
-      if (!cancelled) pollRef.current = setTimeout(pollStatus, 4000);
+      if (!cancelled) pollRef.current = setTimeout(pollStatus, 1500);
     };
 
     hlsStartedRef.current = false;
     qualityCountRef.current = 0;
+    lastReadyRef.current = false;
     setLevels([]);
     setLevel(-1);
-    setPreparing(false);
+    setPreparing(true);
     setError("");
 
-    // Direct Telegram Range playback starts immediately. HLS is a progressive
-    // enhancement and no longer blocks playback while the rolling source prepares.
+    // Keep the direct source as an immediate fallback, but never depend on an
+    // external CDN for HLS. HLS.js is bundled with the Vercel build.
     directPlay();
     pollStatus();
 
@@ -223,7 +229,7 @@ export default function AdaptiveVideo({ src, fallbackSrc, autoPlay = false, styl
         style={{ width: "100%", display: "block", background: "#000", ...style }}
         {...props}
       />
-      {preparing && <div style={{ position: "absolute", top: 10, left: 10, zIndex: 6, background: "rgba(0,0,0,.72)", color: "white", borderRadius: 7, padding: "5px 8px", fontSize: 10, fontWeight: 700, pointerEvents: "none" }}>⚡ Playing now · Adaptive quality preparing…</div>}
+      {preparing && <div style={{ position: "absolute", top: 10, left: 10, zIndex: 6, background: "rgba(0,0,0,.72)", color: "white", borderRadius: 7, padding: "5px 8px", fontSize: 10, fontWeight: 700, pointerEvents: "none" }}>⚡ Preparing adaptive stream…</div>}
       {levels.length > 0 && <select value={level} onChange={chooseLevel} aria-label="Video quality" style={{ position: "absolute", right: 10, bottom: 42, zIndex: 5, background: "rgba(0,0,0,.78)", color: "white", border: "1px solid rgba(255,255,255,.2)", borderRadius: 6, padding: "4px 7px", fontSize: 11 }}>
         <option value={-1}>Auto</option>
         {levels.map((l, i) => <option key={`${l.height}-${i}`} value={i}>{l.height ? `${l.height}p` : `${Math.round((l.bitrate || 0) / 1000)} kbps`}</option>)}
