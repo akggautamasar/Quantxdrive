@@ -27,22 +27,32 @@ async def _lock_for(file_id: int):
         return PREPARE_LOCKS.setdefault(file_id, asyncio.Lock())
 
 
-async def _write_telegram_to_pipe(file: dict, pipe):
+async def _download_source(file: dict, destination: Path):
+    """Download the complete Telegram object before handing it to FFmpeg.
+
+    MP4/MOV containers are particularly sensitive to truncated pipes because
+    FFmpeg may need the container metadata at EOF. The normal media endpoint
+    remains range-streaming; HLS preparation deliberately uses a complete
+    local source and verifies its size when the database has one.
+    """
+    expected = int(file.get("size") or 0)
+    tmp = destination.with_suffix(destination.suffix + ".part")
+    tmp.unlink(missing_ok=True)
+    written = 0
     try:
-        async for chunk in main._stream_media_with_refresh(file):
-            if chunk:
-                pipe.write(chunk)
-                await pipe.drain()
-        pipe.close()
-        try:
-            await pipe.wait_closed()
-        except Exception:
-            pass
+        with tmp.open("wb") as fh:
+            async for chunk in main._stream_media_with_refresh(file):
+                if chunk:
+                    fh.write(chunk)
+                    written += len(chunk)
+        if expected and written != expected:
+            raise RuntimeError(
+                f"Telegram download incomplete: received {written} bytes, expected {expected}"
+            )
+        tmp.replace(destination)
+        print(f"✅ HLS source downloaded: file {file.get('id')} ({written} bytes)", flush=True)
     except Exception:
-        try:
-            pipe.close()
-        except Exception:
-            pass
+        tmp.unlink(missing_ok=True)
         raise
 
 
@@ -60,13 +70,13 @@ def _write_master(out_dir: Path):
     (out_dir / "master.m3u8").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-async def _run_ffmpeg(file: dict, out_dir: Path):
+async def _run_ffmpeg(source: Path, out_dir: Path):
     for i in range(3):
         (out_dir / f"v{i}").mkdir(parents=True, exist_ok=True)
 
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-i", "pipe:0",
+        "-i", str(source),
         "-filter_complex", "[0:v:0]split=3[v144][v240][v360]",
 
         "-map", "[v144]", "-map", "0:a:0?",
@@ -94,46 +104,14 @@ async def _run_ffmpeg(file: dict, out_dir: Path):
         "-hls_segment_filename", str(out_dir / "v2" / "seg_%05d.ts"), str(out_dir / "v2" / "playlist.m3u8"),
     ]
 
-    # A Telegram transport error used to be hidden because the feeder task was
-    # not awaited. FFmpeg then saw a truncated pipe and reported "partial file".
-    # Retry the complete transcode when the feeder or FFmpeg fails.
-    last_error = None
-    for attempt in range(1, 3):
-        if attempt > 1:
-            for i in range(3):
-                shutil.rmtree(out_dir / f"v{i}", ignore_errors=True)
-                (out_dir / f"v{i}").mkdir(parents=True, exist_ok=True)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        feeder = asyncio.create_task(_write_telegram_to_pipe(file, proc.stdin))
-        try:
-            proc_result, stderr, feeder_result = await asyncio.gather(
-                proc.wait(), proc.stderr.read(), feeder, return_exceptions=True
-            )
-        finally:
-            if not feeder.done():
-                feeder.cancel()
-                try:
-                    await feeder
-                except asyncio.CancelledError:
-                    pass
-
-        if isinstance(proc_result, Exception):
-            last_error = proc_result
-        elif isinstance(feeder_result, Exception):
-            last_error = RuntimeError(f"Telegram media feeder failed: {feeder_result}")
-        elif proc.returncode != 0:
-            detail = stderr.decode("utf-8", "ignore")[-6000:]
-            last_error = RuntimeError(f"ffmpeg failed ({proc.returncode}): {detail}")
-        else:
-            _write_master(out_dir)
-            return
-
-        print(f"⚠️ HLS attempt {attempt}/2 failed for file {file.get('id')}: {last_error}", flush=True)
-
-    raise last_error or RuntimeError("HLS preparation failed")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        detail = stderr.decode("utf-8", "ignore")[-6000:]
+        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {detail}")
+    _write_master(out_dir)
 
 
 async def prepare_hls(file_id: int):
@@ -159,10 +137,25 @@ async def prepare_hls(file_id: int):
         tmp_dir = HLS_ROOT / f".{file_id}.building"
         shutil.rmtree(tmp_dir, ignore_errors=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
+        source = tmp_dir / "source" + Path(file.get("filename") or "video.mp4").suffix
+        # Ensure the expression above always produces a Path even for unusual names.
+        source = tmp_dir / ("source" + Path(file.get("filename") or "video.mp4").suffix)
         try:
-            await _run_ffmpeg(file, tmp_dir)
-            shutil.rmtree(out_dir, ignore_errors=True)
-            tmp_dir.rename(out_dir)
+            for attempt in range(1, 3):
+                try:
+                    await _download_source(file, source)
+                    await _run_ffmpeg(source, tmp_dir)
+                    source.unlink(missing_ok=True)
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    tmp_dir.rename(out_dir)
+                    print(f"✅ HLS ready for file {file_id}", flush=True)
+                    return file
+                except Exception as exc:
+                    source.unlink(missing_ok=True)
+                    if attempt == 2:
+                        raise
+                    print(f"⚠️ HLS source/transcode attempt {attempt}/2 failed for file {file_id}: {exc}", flush=True)
+                    await asyncio.sleep(0.5)
         except Exception:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
