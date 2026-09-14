@@ -1,0 +1,101 @@
+name: Instant Video Playback Patch
+on:
+  workflow_dispatch:
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch AdaptiveVideo
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('frontend/src/AdaptiveVideo.jsx')
+          s=p.read_text()
+          s=s.replace('const [error, setError] = useState("");', 'const [error, setError] = useState("");\n  const pollRef = useRef(null);\n  const hlsStartedRef = useRef(false);')
+          start=s.index('  useEffect(() => {', s.index('export default function AdaptiveVideo'))
+          end=s.index('\n\n  const chooseLevel', start)
+          effect=r'''  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !fallbackSrc) return undefined;
+    let cancelled = false;
+
+    const destroyHls = () => {
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    };
+    const stopPoll = () => {
+      if (pollRef.current) { clearTimeout(pollRef.current); pollRef.current = null; }
+    };
+    const directPlay = () => {
+      if (cancelled) return;
+      destroyHls();
+      video.src = fallbackSrc;
+      video.load();
+      if (autoPlay) video.play().catch(() => {});
+    };
+    const startHls = async () => {
+      if (cancelled || hlsStartedRef.current) return;
+      hlsStartedRef.current = true;
+      stopPoll();
+      const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      const wasPlaying = !video.paused;
+      try {
+        const Hls = await loadHls();
+        if (cancelled || !Hls) return;
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = src;
+          video.addEventListener('loadedmetadata', () => {
+            if (resumeAt > 0) { try { video.currentTime = resumeAt; } catch {} }
+            if (wasPlaying || autoPlay) video.play().catch(() => {});
+          }, {once:true});
+          return;
+        }
+        if (!Hls.isSupported()) return;
+        const hls = new Hls({
+          enableWorker:true, capLevelToPlayerSize:true, startLevel:0,
+          abrEwmaDefaultEstimate:120000, abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.7,
+          maxBufferLength:8, maxMaxBufferLength:20, backBufferLength:10,
+          fragLoadingMaxRetry:4, manifestLoadingMaxRetry:3, levelLoadingMaxRetry:4,
+        });
+        hlsRef.current = hls;
+        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+          if (cancelled) return;
+          setLevels(data.levels || []);
+          const restore=()=>{ if(resumeAt>0){try{video.currentTime=resumeAt}catch{}} if(wasPlaying||autoPlay)video.play().catch(()=>{}); };
+          if(video.readyState>=1) restore(); else video.addEventListener('loadedmetadata',restore,{once:true});
+        });
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (cancelled || !data?.fatal) return;
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); return; } catch {} }
+          hlsStartedRef.current=false; setLevels([]); setLevel(-1); directPlay();
+        });
+        hls.loadSource(src); hls.attachMedia(video);
+      } catch { if(!cancelled) directPlay(); }
+    };
+    const pollStatus = async () => {
+      if(cancelled || hlsStartedRef.current || !src) return;
+      try {
+        const r=await fetch(src.replace(/\/master\.m3u8$/, '/status'), {cache:'no-store'});
+        if(r.ok){ const d=await r.json(); if(d.ready){await startHls();return;} setPreparing(!!d.preparing); }
+      } catch {}
+      if(!cancelled&&!hlsStartedRef.current) pollRef.current=setTimeout(pollStatus,3000);
+    };
+
+    hlsStartedRef.current=false; setLevels([]); setLevel(-1); setPreparing(false); setError('');
+    // PRIMARY PATH: play the original Telegram Range stream immediately.
+    directPlay();
+    // SECONDARY PATH: prepare/check adaptive HLS without delaying playback.
+    pollStatus();
+    return () => { cancelled=true; stopPoll(); destroyHls(); video.removeAttribute('src'); video.load(); };
+  }, [src, fallbackSrc, autoPlay]);'''
+          p.write_text(s[:start]+effect+s[end:])
+          PY
+      - name: Commit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add frontend/src/AdaptiveVideo.jsx
+          git diff --cached --quiet || git commit -m 'Make video playback instant while HLS prepares'
+          git push
