@@ -94,28 +94,45 @@ def _write_master(out_dir: Path):
 
 
 async def _run_ffmpeg(source: Path, out_dir: Path):
-    for i in range(3):
-        (out_dir / f"v{i}").mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(source),
-        "-filter_complex", "[0:v:0]split=3[v144][v240][v360]",
-        "-map", "[v144]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
-        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
-        "-s:v", "256x144", "-b:v", "120k", "-maxrate", "150k", "-bufsize", "240k", "-c:a", "aac", "-ar", "44100", "-b:a", "32k", "-ac", "2",
-        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments", "-hls_segment_filename", str(out_dir / "v0" / "seg_%05d.ts"), str(out_dir / "v0" / "playlist.m3u8"),
-        "-map", "[v240]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
-        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
-        "-s:v", "426x240", "-b:v", "220k", "-maxrate", "280k", "-bufsize", "440k", "-c:a", "aac", "-ar", "44100", "-b:a", "48k", "-ac", "2",
-        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments", "-hls_segment_filename", str(out_dir / "v1" / "seg_%05d.ts"), str(out_dir / "v1" / "playlist.m3u8"),
-        "-map", "[v360]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
-        "-sc_threshold", "0", "-g", "96", "-keyint_min", "96", "-force_key_frames", "expr:gte(t,n_forced*4)",
-        "-s:v", "640x360", "-b:v", "450k", "-maxrate", "550k", "-bufsize", "900k", "-c:a", "aac", "-ar", "44100", "-b:a", "64k", "-ac", "2",
-        "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod", "-hls_flags", "independent_segments", "-hls_segment_filename", str(out_dir / "v2" / "seg_%05d.ts"), str(out_dir / "v2" / "playlist.m3u8"),
+    """Encode variants sequentially with one FFmpeg thread to stay below 512 MB."""
+    variants = [
+        ("v0", "256x144", "120k", "150k", "240k", "32k"),
+        ("v1", "426x240", "220k", "280k", "440k", "48k"),
+        ("v2", "640x360", "450k", "550k", "900k", "64k"),
     ]
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {stderr.decode('utf-8', 'ignore')[-6000:]}")
+    for name, resolution, video_bitrate, maxrate, bufsize, audio_bitrate in variants:
+        variant_dir = out_dir / name
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        playlist = variant_dir / "playlist.m3u8"
+        segment_pattern = variant_dir / "seg_%05d.ts"
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+            "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
+            "-sc_threshold", "0", "-g", "96", "-keyint_min", "96",
+            "-force_key_frames", "expr:gte(t,n_forced*4)",
+            "-s:v", resolution, "-b:v", video_bitrate, "-maxrate", maxrate, "-bufsize", bufsize,
+            "-c:a", "aac", "-ar", "44100", "-b:a", audio_bitrate, "-ac", "2",
+            "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
+            "-hls_flags", "independent_segments", "-hls_segment_filename", str(segment_pattern),
+            str(playlist),
+        ]
+        print(f"🎞️ HLS encoding {name} for source {source.name}", flush=True)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8', 'ignore')[-6000:]}"
+            )
+        if not playlist.exists():
+            raise RuntimeError(f"ffmpeg {name} produced no playlist")
+
     _write_master(out_dir)
 
 
