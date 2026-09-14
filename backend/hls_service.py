@@ -13,7 +13,7 @@ PREPARE_LOCKS = {}
 PREPARE_TASKS = {}
 PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
-HLS_TRANSCODE_SEMAPHORE = asyncio.Semaphore(1)
+HLS_JOB_SEMAPHORE = asyncio.Semaphore(1)
 MAX_HLS_SOURCE_BYTES = int(os.getenv("HLS_MAX_SOURCE_BYTES", str(2 * 1024 * 1024 * 1024)))
 
 
@@ -80,113 +80,88 @@ async def _download_source(file: dict, destination: Path):
         raise
 
 
-def _write_master(out_dir: Path):
-    variants = [("v0", 256, 144, 150000), ("v1", 426, 240, 280000), ("v2", 640, 360, 550000)]
-    lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
-    for name, width, height, bandwidth in variants:
-        playlist = out_dir / name / "playlist.m3u8"
-        if not playlist.exists():
-            raise RuntimeError(f"missing HLS variant playlist: {name}")
-        lines += [
-            f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={width}x{height}",
-            f"{name}/playlist.m3u8",
-        ]
-    (out_dir / "master.m3u8").write_text("\n".join(lines) + "\n", encoding="utf-8")
+VARIANTS = [
+    ("v0", "256x144", "96k", "120k", "200k", "24k"),
+    ("v1", "426x240", "180k", "220k", "360k", "32k"),
+    ("v2", "640x360", "400k", "480k", "720k", "48k"),
+]
 
+def _write_master(out_dir: Path, names):
+    specs={name:(resolution,maxrate) for name,resolution,_,maxrate,_,_ in VARIANTS}
+    lines=["#EXTM3U","#EXT-X-VERSION:3"]
+    for name in names:
+        resolution,bandwidth=specs[name]
+        lines += [f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={resolution}",f"{name}/playlist.m3u8"]
+    tmp=out_dir/"master.m3u8.tmp"
+    tmp.write_text("\n".join(lines)+"\n",encoding="utf-8")
+    tmp.replace(out_dir/"master.m3u8")
 
-async def _run_ffmpeg(source: Path, out_dir: Path):
-    """Encode variants sequentially with one FFmpeg thread to stay below 512 MB."""
-    variants = [
-        ("v0", "256x144", "120k", "150k", "240k", "32k"),
-        ("v1", "426x240", "220k", "280k", "440k", "48k"),
-        ("v2", "640x360", "450k", "550k", "900k", "64k"),
-    ]
-    for name, resolution, video_bitrate, maxrate, bufsize, audio_bitrate in variants:
-        variant_dir = out_dir / name
-        variant_dir.mkdir(parents=True, exist_ok=True)
-        playlist = variant_dir / "playlist.m3u8"
-        segment_pattern = variant_dir / "seg_%05d.ts"
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
-            "-i", str(source),
-            "-map", "0:v:0", "-map", "0:a:0?",
-            "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
-            "-sc_threshold", "0", "-g", "96", "-keyint_min", "96",
-            "-force_key_frames", "expr:gte(t,n_forced*4)",
-            "-s:v", resolution, "-b:v", video_bitrate, "-maxrate", maxrate, "-bufsize", bufsize,
-            "-c:a", "aac", "-ar", "44100", "-b:a", audio_bitrate, "-ac", "2",
-            "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
-            "-hls_flags", "independent_segments", "-hls_segment_filename", str(segment_pattern),
-            str(playlist),
-        ]
-        print(f"🎞️ HLS encoding {name} for source {source.name}", flush=True)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8', 'ignore')[-6000:]}"
-            )
-        if not playlist.exists():
-            raise RuntimeError(f"ffmpeg {name} produced no playlist")
-
-    _write_master(out_dir)
-
+async def _encode_variant(source: Path, out_dir: Path, variant, live=False):
+    name,resolution,video_bitrate,maxrate,bufsize,audio_bitrate=variant
+    variant_dir=out_dir/name
+    variant_dir.mkdir(parents=True,exist_ok=True)
+    playlist=variant_dir/"playlist.m3u8"
+    segment_pattern=variant_dir/"seg_%05d.ts"
+    cmd=["ffmpeg","-hide_banner","-loglevel","error","-threads","1","-filter_threads","1","-filter_complex_threads","1","-i",str(source),"-map","0:v:0","-map","0:a:0?","-c:v","libx264","-preset","ultrafast","-profile:v","main","-pix_fmt","yuv420p","-sc_threshold","0","-r","24","-g","48","-keyint_min","48","-force_key_frames","expr:gte(t,n_forced*2)","-s:v",resolution,"-b:v",video_bitrate,"-maxrate",maxrate,"-bufsize",bufsize,"-c:a","aac","-ar","44100","-b:a",audio_bitrate,"-ac","2","-f","hls","-hls_time","2","-hls_list_size","0","-hls_flags","independent_segments","-hls_segment_filename",str(segment_pattern),"-hls_playlist_type","event" if live else "vod",str(playlist)]
+    print(f"🎞️ HLS encoding {name} for source {source.name}",flush=True)
+    proc=await asyncio.create_subprocess_exec(*cmd,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.PIPE)
+    if live:
+        for _ in range(120):
+            if playlist.exists() and list(variant_dir.glob("seg_*.ts")):
+                print(f"⚡ HLS first segment ready for {name}",flush=True)
+                return proc,playlist
+            if proc.returncode is not None: break
+            await asyncio.sleep(0.25)
+    _,stderr=await proc.communicate()
+    if proc.returncode!=0: raise RuntimeError(f"ffmpeg {name} failed ({proc.returncode}): {stderr.decode('utf-8','ignore')[-6000:]}")
+    if not playlist.exists(): raise RuntimeError(f"ffmpeg {name} produced no playlist")
+    return None,playlist
 
 async def prepare_hls(file_id: int):
-    file = await main.db.get_file_by_id(file_id)
-    if not file:
-        raise HTTPException(status_code=404, detail="File not found")
-    mime = file.get("mime") or main.get_mime(file.get("filename", ""))
-    if not mime.startswith("video/"):
-        raise HTTPException(status_code=400, detail="HLS is available only for videos")
-    size = int(file.get("size") or 0)
-    if size and size > MAX_HLS_SOURCE_BYTES:
-        raise HTTPException(status_code=413, detail="Video is too large for on-demand HLS preparation")
-    master = _master_path(file_id)
-    if master.exists():
-        return file
-    lock = await _lock_for(file_id)
+    file=await main.db.get_file_by_id(file_id)
+    if not file: raise HTTPException(status_code=404,detail="File not found")
+    mime=file.get("mime") or main.get_mime(file.get("filename",""))
+    if not mime.startswith("video/"): raise HTTPException(status_code=400,detail="HLS is available only for videos")
+    size=int(file.get("size") or 0)
+    if size and size>MAX_HLS_SOURCE_BYTES: raise HTTPException(status_code=413,detail="Video is too large for on-demand HLS preparation")
+    master=_master_path(file_id)
+    if master.exists(): return file
+    lock=await _lock_for(file_id)
     async with lock:
-        if master.exists():
-            return file
-        out_dir = _dir(file_id)
-        tmp_dir = HLS_ROOT / f".{file_id}.building"
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(file.get("filename") or "video.mp4").suffix.lower() or ".mp4"
-        source = tmp_dir / ("source" + suffix)
-        try:
-            for attempt in range(1, 3):
-                try:
-                    await _download_source(file, source)
-                    async with HLS_TRANSCODE_SEMAPHORE:
-                        await _run_ffmpeg(source, tmp_dir)
-                    source.unlink(missing_ok=True)
-                    shutil.rmtree(out_dir, ignore_errors=True)
-                    tmp_dir.rename(out_dir)
-                    print(f"✅ HLS ready for file {file_id}", flush=True)
-                    return file
-                except Exception as exc:
-                    source.unlink(missing_ok=True)
-                    if attempt == 2:
-                        raise
-                    print(f"⚠️ HLS attempt {attempt}/2 failed for file {file_id}: {exc}", flush=True)
-                    await asyncio.sleep(0.5)
-        except Exception:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise
+        if master.exists(): return file
+        async with HLS_JOB_SEMAPHORE:
+            out_dir=_dir(file_id); tmp_dir=HLS_ROOT/f".{file_id}.building"
+            shutil.rmtree(tmp_dir,ignore_errors=True); shutil.rmtree(out_dir,ignore_errors=True); tmp_dir.mkdir(parents=True,exist_ok=True)
+            suffix=Path(file.get("filename") or "video.mp4").suffix.lower() or ".mp4"
+            source=tmp_dir/("source"+suffix)
+            try:
+                await _download_source(file,source)
+                out_dir.mkdir(parents=True,exist_ok=True)
+                proc0,_=await _encode_variant(source,out_dir,VARIANTS[0],live=True)
+                _write_master(out_dir,["v0"])
+                print(f"⚡ HLS low-bandwidth stream ready for file {file_id}",flush=True)
+                if proc0:
+                    _,err=await proc0.communicate()
+                    if proc0.returncode!=0: raise RuntimeError(f"ffmpeg v0 failed ({proc0.returncode}): {err.decode('utf-8','ignore')[-6000:]}")
+                await _encode_variant(source,out_dir,VARIANTS[1],live=False)
+                _write_master(out_dir,["v0","v1"])
+                print(f"⚡ HLS 240p available for file {file_id}",flush=True)
+                await _encode_variant(source,out_dir,VARIANTS[2],live=False)
+                _write_master(out_dir,["v0","v1","v2"])
+                print(f"⚡ HLS 360p available for file {file_id}",flush=True)
+                source.unlink(missing_ok=True); shutil.rmtree(tmp_dir,ignore_errors=True)
+                print(f"✅ HLS ready for file {file_id}",flush=True)
+                return file
+            except Exception:
+                source.unlink(missing_ok=True); shutil.rmtree(tmp_dir,ignore_errors=True)
+                if not master.exists(): shutil.rmtree(out_dir,ignore_errors=True)
+                raise
     return file
-
 
 def _hls_response(path: Path, media_type: str) -> Response:
     body = path.read_bytes()
     return Response(content=body, media_type=media_type, headers={
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
         "Content-Length": str(len(body)),
         "Accept-Ranges": "none",
     })
@@ -223,27 +198,15 @@ def register_hls_routes(app):
 
     @app.get("/api/hls/{token}/{file_id}/status")
     async def hls_status(token: str, file_id: int):
-        if not main.verify_jwt(token):
-            raise HTTPException(status_code=401, detail="Invalid token")
-        file = await main.db.get_file_by_id(file_id)
-        if not file:
-            raise HTTPException(status_code=404, detail="File not found")
-
-        master = _master_path(file_id)
-        if master.exists():
-            PREPARE_FAILED.discard(file_id)
-            return {"ready": True, "preparing": False, "failed": False}
-
-        if file_id in PREPARE_FAILED:
-            return {"ready": False, "preparing": False, "failed": True}
-
-        task = PREPARE_TASKS.get(file_id)
-        if not task or task.done():
-            await _start_prepare(file_id)
-            task = PREPARE_TASKS.get(file_id)
-
-        return {
-            "ready": master.exists(),
-            "preparing": bool(task and not task.done()),
-            "failed": file_id in PREPARE_FAILED,
-        }
+        if not main.verify_jwt(token): raise HTTPException(status_code=401,detail="Invalid token")
+        file=await main.db.get_file_by_id(file_id)
+        if not file: raise HTTPException(status_code=404,detail="File not found")
+        master=_master_path(file_id)
+        if not master.exists() and file_id not in PREPARE_FAILED:
+            task=PREPARE_TASKS.get(file_id)
+            if not task or task.done(): await _start_prepare(file_id)
+        task=PREPARE_TASKS.get(file_id)
+        available=[name for name,*_ in VARIANTS if (_dir(file_id)/name/"playlist.m3u8").exists()]
+        ready=master.exists()
+        if ready: PREPARE_FAILED.discard(file_id)
+        return {"ready":ready,"preparing":bool(task and not task.done()),"failed":file_id in PREPARE_FAILED and not ready,"qualities":available}
