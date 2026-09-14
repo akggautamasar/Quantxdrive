@@ -15,7 +15,12 @@ PREPARE_LOCKS = {}
 PREPARE_TASKS = {}
 PREPARE_FAILED = set()
 PREPARE_LOCKS_GUARD = asyncio.Lock()
-HLS_JOB_SEMAPHORE = asyncio.Semaphore(1)
+
+# Keep interactive first-segment generation independent from the slower
+# quality-upgrade work. The small v0 limit prevents an unbounded FFmpeg storm,
+# while allowing a new video to start even when another video's upgrades run.
+HLS_V0_SEMAPHORE = asyncio.Semaphore(2)
+HLS_UPGRADE_SEMAPHORE = asyncio.Semaphore(1)
 
 # FFmpeg is deliberately given a seekable HTTP view of Telegram rather than a
 # pipe or a local copy of the complete source. This lets the MP4/MOV demuxer
@@ -126,6 +131,13 @@ async def _encode_variant(source_url: str, source_label: str, out_dir: Path, var
         raise RuntimeError(f"ffmpeg {name} produced no playlist")
     return None, playlist
 
+async def _encode_first_variant(source_url: str, file_id: int, out_dir: Path):
+    # Only the time until the first segment is published is serialized. The
+    # FFmpeg process remains alive afterwards, but a new file can claim the
+    # second v0 slot immediately instead of waiting for this file's full encode.
+    async with HLS_V0_SEMAPHORE:
+        return await _encode_variant(source_url, str(file_id), out_dir, VARIANTS[0], live=True)
+
 async def prepare_hls(file_id: int):
     file = await main.db.get_file_by_id(file_id)
     if not file:
@@ -140,18 +152,21 @@ async def prepare_hls(file_id: int):
     async with lock:
         if master.exists():
             return file
-        async with HLS_JOB_SEMAPHORE:
-            out_dir = _dir(file_id)
-            shutil.rmtree(out_dir, ignore_errors=True)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            source_url = (
-                f"http://127.0.0.1:{HLS_PROXY_PORT}/internal/hls-source/"
-                f"{file_id}?key={HLS_PROXY_SECRET}"
-            )
-            try:
-                proc0, _ = await _encode_variant(source_url, str(file_id), out_dir, VARIANTS[0], live=True)
-                _write_master(out_dir, ["v0"])
-                print(f"⚡ HLS low-bandwidth stream ready for file {file_id}", flush=True)
+        out_dir = _dir(file_id)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        source_url = (
+            f"http://127.0.0.1:{HLS_PROXY_PORT}/internal/hls-source/"
+            f"{file_id}?key={HLS_PROXY_SECRET}"
+        )
+        try:
+            proc0, _ = await _encode_first_variant(source_url, file_id, out_dir)
+            _write_master(out_dir, ["v0"])
+            print(f"⚡ HLS low-bandwidth stream ready for file {file_id}", flush=True)
+
+            # Quality upgrades are deliberately separate from first-segment
+            # generation, so they cannot block another video's startup.
+            async with HLS_UPGRADE_SEMAPHORE:
                 if proc0:
                     _, err = await proc0.communicate()
                     if proc0.returncode != 0:
@@ -162,12 +177,12 @@ async def prepare_hls(file_id: int):
                 await _encode_variant(source_url, str(file_id), out_dir, VARIANTS[2], live=False)
                 _write_master(out_dir, ["v0", "v1", "v2"])
                 print(f"⚡ HLS 360p available for file {file_id}", flush=True)
-                print(f"✅ HLS ready for file {file_id}", flush=True)
-                return file
-            except Exception:
-                if not master.exists():
-                    shutil.rmtree(out_dir, ignore_errors=True)
-                raise
+            print(f"✅ HLS ready for file {file_id}", flush=True)
+            return file
+        except Exception:
+            if not master.exists():
+                shutil.rmtree(out_dir, ignore_errors=True)
+            raise
 
 def _hls_response(path: Path, media_type: str) -> Response:
     body = path.read_bytes()
