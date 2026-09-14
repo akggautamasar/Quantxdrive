@@ -11,7 +11,6 @@ HLS_ROOT = Path(os.getenv("HLS_CACHE_DIR", "/tmp/quantxdrive-hls"))
 HLS_ROOT.mkdir(parents=True, exist_ok=True)
 PREPARE_LOCKS = {}
 PREPARE_LOCKS_GUARD = asyncio.Lock()
-PREPARING = set()
 MAX_HLS_SOURCE_BYTES = int(os.getenv("HLS_MAX_SOURCE_BYTES", str(2 * 1024 * 1024 * 1024)))
 
 
@@ -153,24 +152,6 @@ async def prepare_hls(file_id: int):
     return file
 
 
-async def _prepare_background(file_id: int):
-    try:
-        await prepare_hls(file_id)
-    except Exception as exc:
-        print(f"HLS background preparation failed for file {file_id}: {exc}", flush=True)
-    finally:
-        PREPARING.discard(file_id)
-
-
-def _start_background_prepare(file_id: int):
-    if _master_path(file_id).exists() or file_id in PREPARING:
-        return False
-    PREPARING.add(file_id)
-    asyncio.create_task(_prepare_background(file_id))
-    print(f"⏳ HLS preparation started in background for file {file_id}", flush=True)
-    return True
-
-
 def _hls_response(path: Path, media_type: str) -> Response:
     """Serve HLS assets as complete HTTP resources (200), not Range responses (206)."""
     body = path.read_bytes()
@@ -190,15 +171,16 @@ def register_hls_routes(app):
     async def hls_master(token: str, file_id: int):
         if not main.verify_jwt(token):
             raise HTTPException(status_code=401, detail="Invalid token")
+        try:
+            await prepare_hls(file_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            print(f"HLS preparation failed for file {file_id}: {exc}", flush=True)
+            raise HTTPException(status_code=502, detail="Could not prepare video for adaptive streaming")
         master = _master_path(file_id)
         if not master.is_file():
-            _start_background_prepare(file_id)
-            return Response(
-                content='{"ready":false,"preparing":true}',
-                status_code=202,
-                media_type="application/json",
-                headers={"Cache-Control": "no-store"},
-            )
+            raise HTTPException(status_code=503, detail="HLS playlist is not ready")
         return _hls_response(master, "application/vnd.apple.mpegurl")
 
     @app.get("/api/hls/{token}/{file_id}/{variant}/{asset}")
@@ -207,6 +189,7 @@ def register_hls_routes(app):
             raise HTTPException(status_code=401, detail="Invalid token")
         if variant not in {"v0", "v1", "v2"} or "/" in asset or "\\" in asset or asset.startswith("."):
             raise HTTPException(status_code=404, detail="HLS asset not found")
+        await prepare_hls(file_id)
         candidate = _dir(file_id) / variant / asset
         if not candidate.exists() or not candidate.is_file():
             raise HTTPException(status_code=404, detail="HLS asset not found")
@@ -217,4 +200,4 @@ def register_hls_routes(app):
     async def hls_status(token: str, file_id: int):
         if not main.verify_jwt(token):
             raise HTTPException(status_code=401, detail="Invalid token")
-        return {"ready": _master_path(file_id).exists(), "preparing": file_id in PREPARING}
+        return {"ready": _master_path(file_id).exists()}
