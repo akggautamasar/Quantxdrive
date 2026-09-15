@@ -251,10 +251,20 @@ def register_routes(app):
         return {"deleted": channel_id}
 
     @app.post("/api/channels/{channel_id}/sync")
-    async def sync_channel(channel_id: int, body: Optional[dict] = None, _: bool = Depends(main.verify_token)):
-        limit = int((body or {}).get("limit", 0) or 0)
+    async def sync_channel(channel_id: int, request: Request, _: bool = Depends(main.verify_token)):
+        # Body parsing is optional. A sync with no body means full history.
+        limit = 0
         try:
+            if "application/json" in (request.headers.get("content-type") or ""):
+                body = await request.json()
+                if isinstance(body, dict):
+                    limit = int(body.get("limit", 0) or 0)
+        except Exception:
+            limit = 0
+        try:
+            print(f"📺 Channel sync requested: {channel_id}, limit={limit}", flush=True)
             cfg = await _sync_channel(channel_id, max(0, min(limit, 10000)))
+            print(f"📺 Channel sync complete: {channel_id}, scanned={cfg.get('scanned', 0)}, files={cfg.get('files', 0)}, access={cfg.get('access_client')}", flush=True)
             return {"channel": cfg, "synced": True}
         except HTTPException:
             raise
