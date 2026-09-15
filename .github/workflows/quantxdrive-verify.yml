@@ -19,4 +19,4 @@ jobs:
         run: npm install && npm run build
       - name: Compile backend
         working-directory: backend
-        run: python -m py_compile main.py app.py hls_service.py db.py get_session.py
+        run: python -m py_compile main.py app.py hls_service.py db.py get_session.py channels_service.py
