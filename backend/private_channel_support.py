@@ -15,6 +15,18 @@ def _invite_url(target):
     return value
 
 
+async def _session_identity(session):
+    try:
+        me = await session.get_me()
+        if not me:
+            return "unknown Telegram account"
+        username = f"@{me.username}" if getattr(me, "username", None) else "no username"
+        name = " ".join(x for x in [getattr(me, "first_name", None), getattr(me, "last_name", None)] if x)
+        return f"{name or 'Telegram user'} ({username}, id {me.id})"
+    except Exception as exc:
+        return f"unable to read Telegram account ({type(exc).__name__}: {exc})"
+
+
 def install():
     import channels_service as cs
     import main
@@ -45,7 +57,8 @@ def install():
                         if getattr(chat, "id", None) is not None: return chat, session, "session"
                     except Exception as lookup_exc: errors.append(f"already-member lookup: {lookup_exc}")
                 else: errors.append(f"join: {exc}")
-            raise HTTPException(status_code=400, detail="Telegram could not resolve this private invite. Make sure the SESSION_STRING account has access and the invite is valid. " + " | ".join(errors))
+            identity = await _session_identity(session)
+            raise HTTPException(status_code=400, detail="Telegram could not resolve this private invite. Make sure the SESSION_STRING account has access and the invite is valid. Connected SESSION_STRING account: " + identity + (". " + " | ".join(errors) if errors else ""))
 
         if isinstance(target, int):
             try:
@@ -67,10 +80,13 @@ def install():
             except Exception as exc:
                 print(f"📺 SESSION_STRING numeric retry failed: {exc}", flush=True)
 
-            # Do not stop at the user session: if BOT_TOKEN is configured and the
-            # bot is a member/admin, the original resolver can resolve the numeric
-            # ID through that second Telegram identity.
-            return await original(target)
+            identity = await _session_identity(session)
+            # Keep the original resolver as a fallback so a configured bot can
+            # still access a channel when the user session cannot resolve it.
+            try:
+                return await original(target)
+            except HTTPException as original_error:
+                raise HTTPException(status_code=original_error.status_code, detail=f"Could not resolve channel ID {target}. Connected SESSION_STRING account: {identity}. This account must see/be a member of the channel. Telegram: {original_error.detail}")
 
         return await original(target)
 
