@@ -14,7 +14,20 @@ function replacePdfFrame(frame) {
   const url = frame.getAttribute("src");
   const filename = frame.getAttribute("title") || "document.pdf";
   const host = document.createElement("div");
-  host.style.cssText = "width:100%;height:100%;min-height:0;display:block;";
+  // The PDF reader must escape the Channels preview card completely.
+  // Fixed positioning makes the reader occupy the whole available viewport,
+  // including on mobile where the previous modal left large margins visible.
+  host.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "width:100vw",
+    "height:100dvh",
+    "min-height:100vh",
+    "z-index:999999",
+    "display:block",
+    "background:#0a0a0a",
+    "overflow:hidden",
+  ].join(";");
   frame.replaceWith(host);
   const root = createRoot(host);
   roots.set(host, root);
