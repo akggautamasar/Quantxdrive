@@ -73,14 +73,52 @@ async def _resolve_with_clients(target):
     clients = [(main.pyro_client, "session")]
     bot = await _get_bot_client()
     if bot: clients.append((bot, "bot"))
+
+    async def resolve(client, mode):
+        try:
+            return await client.get_chat(target)
+        except Exception as first_error:
+            # A private numeric channel ID only works when Telegram has a peer
+            # for this account. If the account is already a member, enumerate
+            # dialogs once to refresh/find the peer.
+            if isinstance(target, int):
+                try:
+                    async for dialog in client.get_dialogs():
+                        chat = getattr(dialog, "chat", None)
+                        if chat and int(chat.id) == int(target):
+                            print(f"📺 Resolved private channel {target} from {mode} dialogs", flush=True)
+                            return chat
+                except Exception as dialog_error:
+                    errors.append(f"{mode} dialogs: {dialog_error}")
+
+            # Private invite links can resolve a channel even when the peer is
+            # not cached. If already a member, Telegram normally returns the
+            # chat; otherwise join_chat adds the connected user to the channel.
+            if isinstance(target, str) and ("t.me/+" in target or "t.me/joinchat/" in target or target.startswith("+")):
+                try:
+                    chat = await client.join_chat(target)
+                    print(f"📺 Joined/resolved private invite with {mode}", flush=True)
+                    return chat
+                except Exception as join_error:
+                    errors.append(f"{mode} invite: {join_error}")
+
+            errors.append(f"{mode}: {first_error}")
+            return None
+
     for client, mode in clients:
         if not client: continue
-        try:
-            chat = await client.get_chat(target)
+        chat = await resolve(client, mode)
+        if chat:
             return chat, client, mode
-        except Exception as exc:
-            errors.append(f"{mode}: {exc}")
-    raise HTTPException(status_code=400, detail="Telegram could not access this channel. " + " | ".join(errors))
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Telegram could not access this channel. For a private channel, use its "
+            "private invite link (t.me/+... or t.me/joinchat/...) or make sure the "
+            "SESSION_STRING account is already a member. " + " | ".join(errors)
+        ),
+    )
 
 
 def _normalize_target(raw: str):
@@ -88,21 +126,28 @@ def _normalize_target(raw: str):
     if not value: return None
     if value.lstrip("-").isdigit(): return int(value)
     if value.startswith("@"): return value
+    if value.startswith("+"): return value
     if value.startswith(("http://", "https://")):
-        parsed = urlparse(value); host = (parsed.netloc or "").lower()
+        parsed = urlparse(value)
+        host = (parsed.netloc or "").lower()
         if host.endswith("t.me") or host.endswith("telegram.me"):
             parts = [p for p in parsed.path.split("/") if p]
-            if parts and parts[0] not in {"c", "joinchat"} and not parts[0].startswith("+"): return "@" + parts[0]
+            if parts and parts[0] == "joinchat" and len(parts) > 1: return value
+            if parts and parts[0].startswith("+"): return value
+            if parts and parts[0] != "c": return "@" + parts[0]
     if value.startswith(("t.me/", "telegram.me/")):
-        parts = [p for p in value.split("/", 1)[1].split("/") if p]
-        if parts and parts[0] not in {"c", "joinchat"} and not parts[0].startswith("+"): return "@" + parts[0]
+        rest = value.split("/", 1)[1]
+        parts = [p for p in rest.split("/") if p]
+        if parts and parts[0] == "joinchat" and len(parts) > 1: return value
+        if parts and parts[0].startswith("+"): return value
+        if parts and parts[0] != "c": return "@" + parts[0]
     if all(ch.isalnum() or ch == "_" for ch in value): return "@" + value
     return value
 
 
 async def _resolve_channel(raw: str):
     target = _normalize_target(raw)
-    if target is None: raise HTTPException(status_code=400, detail="Enter a Telegram channel ID, @username, or public t.me/username link")
+    if target is None: raise HTTPException(status_code=400, detail="Enter a Telegram channel ID, @username, or private invite link")
     chat, client, mode = await _resolve_with_clients(target)
     return chat, target, client, mode
 
