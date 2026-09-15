@@ -60,7 +60,7 @@ function PdfPage({ pdf, pageNumber, scale, onVisible }) {
   );
 }
 
-export default function PdfReader({ url, filename = "document.pdf" }) {
+export default function PdfReader({ url, filename = "document.pdf", onBack }) {
   const [pdf, setPdf] = useState(null);
   const [pages, setPages] = useState(0);
   const [scale, setScale] = useState(1);
@@ -68,7 +68,7 @@ export default function PdfReader({ url, filename = "document.pdf" }) {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const [current, setCurrent] = useState(1);
-  const [fullScreen, setFullScreen] = useState(false);
+  const [fullScreen, setFullScreen] = useState(true);
   const [barVisible, setBarVisible] = useState(true);
   const scrollerRef = useRef(null);
   const hideTimer = useRef(null);
@@ -88,8 +88,6 @@ export default function PdfReader({ url, filename = "document.pdf" }) {
       try {
         task = pdfjsLib.getDocument({
           url,
-          // QuantXDrive's /api/media endpoint supports HTTP Range requests.
-          // 1 MiB chunks reduce request overhead while keeping first-page loading bounded.
           rangeChunkSize: 1024 * 1024,
           disableRange: false,
           disableStream: true,
@@ -228,21 +226,14 @@ export default function PdfReader({ url, filename = "document.pdf" }) {
     >
       <div style={{ ...styles.toolbar, ...(barVisible ? null : styles.toolbarHidden) }}>
         <div style={styles.left}>
+          <button onClick={onBack} style={styles.backButton} title="Back to Channels" aria-label="Back to Channels">←</button>
           <span style={styles.filename} title={filename}>{filename}</span>
           <span style={styles.badge}>PDF</span>
         </div>
         <div style={styles.center}>
           <button onClick={() => jump(current - 1)} disabled={!pages || current <= 1} style={styles.tool} title="Previous">‹</button>
           <div style={styles.counterWrap}>
-            <input
-              type="number"
-              min="1"
-              max={pages || 1}
-              value={current}
-              onChange={e => setCurrent(Number(e.target.value) || 1)}
-              onKeyDown={e => { if (e.key === "Enter") jump(Number(e.currentTarget.value)); }}
-              style={styles.pageInput}
-            />
+            <input type="number" min="1" max={pages || 1} value={current} onChange={e => setCurrent(Number(e.target.value) || 1)} onKeyDown={e => { if (e.key === "Enter") jump(Number(e.currentTarget.value)); }} style={styles.pageInput} />
             <span>/ {pages || "—"}</span>
           </div>
           <button onClick={() => jump(current + 1)} disabled={!pages || current >= pages} style={styles.tool} title="Next">›</button>
@@ -261,52 +252,23 @@ export default function PdfReader({ url, filename = "document.pdf" }) {
       </div>
 
       <div ref={scrollerRef} style={styles.scroller}>
-        {loading && (
-          <div style={styles.status}>
-            <div style={styles.spinner} />
-            <b>Opening PDF…</b>
-            <span>{progress ? `${progress}%` : "Preparing range requests…"}</span>
-          </div>
-        )}
-        {error && (
-          <div style={styles.status}>
-            <b>PDF reader error</b>
-            <span>{error}</span>
-            <div style={styles.statusActions}>
-              <button onClick={openBrowser} style={styles.browserButton}>🌐 Open in Browser</button>
-              <a href={url} download={filename} style={styles.download}>↓ Download PDF</a>
-            </div>
-          </div>
-        )}
-        {!error && pdf && Array.from({ length: pages }, (_, i) => (
-          <PdfPage
-            key={`${url}-${i + 1}`}
-            pdf={pdf}
-            pageNumber={i + 1}
-            scale={scale}
-            onVisible={n => { if (n === visiblePageRef.current) setCurrent(n); }}
-          />
-        ))}
+        {loading && <div style={styles.status}><div style={styles.spinner} /><b>Opening PDF…</b><span>{progress ? `${progress}%` : "Preparing range requests…"}</span></div>}
+        {error && <div style={styles.status}><b>PDF reader error</b><span>{error}</span><div style={styles.statusActions}><button onClick={openBrowser} style={styles.browserButton}>🌐 Open in Browser</button><a href={url} download={filename} style={styles.download}>↓ Download PDF</a></div></div>}
+        {!error && pdf && Array.from({ length: pages }, (_, i) => <PdfPage key={`${url}-${i + 1}`} pdf={pdf} pageNumber={i + 1} scale={scale} onVisible={n => { if (n === visiblePageRef.current) setCurrent(n); }} />)}
       </div>
     </div>
   );
 }
 
 const styles = {
-  wrap: {
-    width: "100%", height: "100%", minHeight: 0, display: "flex", flexDirection: "column",
-    background: "#0a0a0a", color: "#e2e2e2", overflow: "hidden", fontFamily: "monospace",
-  },
-  fullScreen: { position: "fixed", inset: 0, width: "100vw", height: "100dvh", zIndex: 99999, borderRadius: 0 },
-  toolbar: {
-    flexShrink: 0, minHeight: 48, display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
-    background: "rgba(10,10,10,.96)", borderBottom: "1px solid rgba(255,255,255,.08)",
-    backdropFilter: "blur(24px)", zIndex: 5, transition: "transform 180ms ease, opacity 180ms ease",
-  },
+  wrap: { width: "100%", height: "100%", minHeight: 0, display: "flex", flexDirection: "column", background: "#0a0a0a", color: "#e2e2e2", overflow: "hidden", fontFamily: "monospace" },
+  fullScreen: { position: "fixed", inset: 0, width: "100vw", height: "100dvh", zIndex: 999999, borderRadius: 0 },
+  toolbar: { flexShrink: 0, minHeight: 48, display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: "rgba(10,10,10,.96)", borderBottom: "1px solid rgba(255,255,255,.08)", backdropFilter: "blur(24px)", zIndex: 5, transition: "transform 180ms ease, opacity 180ms ease" },
   toolbarHidden: { transform: "translateY(-100%)", opacity: 0, pointerEvents: "none", position: "absolute", top: 0, left: 0, right: 0 },
   left: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, overflow: "hidden" },
   center: { display: "flex", alignItems: "center", justifyContent: "center", gap: 4, flexShrink: 0 },
   right: { flex: 1, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 5, minWidth: 0 },
+  backButton: { border: "1px solid rgba(185,247,81,.3)", background: "rgba(185,247,81,.1)", color: "#b9f751", borderRadius: 7, minWidth: 38, height: 32, padding: "0 10px", cursor: "pointer", fontSize: 21, fontWeight: 700, lineHeight: 1 },
   filename: { maxWidth: 170, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 700, opacity: .8 },
   badge: { fontSize: 9, padding: "2px 6px", borderRadius: 4, border: "1px solid rgba(255,255,255,.08)", color: "#777" },
   tool: { border: "1px solid rgba(255,255,255,.08)", background: "transparent", color: "#aaa", borderRadius: 7, minWidth: 32, height: 32, fontSize: 18, cursor: "pointer" },
