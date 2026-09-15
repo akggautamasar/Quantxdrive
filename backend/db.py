@@ -59,6 +59,8 @@ async def load_index(client):
         import main
         from channels_service import register_routes
         register_routes(main.app)
+        from private_channel_support import install as install_private_channel_support
+        install_private_channel_support()
         print(f"📺 Channel routes ready ({len(_index.get('channels', []))} configured)")
     except Exception as e:
         print(f"⚠️  Channel routes could not be registered: {e}")
