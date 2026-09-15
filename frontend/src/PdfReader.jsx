@@ -62,7 +62,7 @@ export default function PdfReader({ url, filename }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [current, setCurrent] = useState(1);
-  const [fullScreen, setFullScreen] = useState(true);
+  const [fullScreen, setFullScreen] = useState(false);
   const scrollerRef = useRef(null);
 
   useEffect(() => {
@@ -107,12 +107,13 @@ export default function PdfReader({ url, filename }) {
   return (
     <div style={{ ...styles.wrap, ...(fullScreen ? styles.fullScreen : {}) }}>
       <div style={styles.toolbar}>
-        <button onClick={() => setFullScreen(v => !v)} style={styles.modeButton} title={fullScreen ? "Exit full screen" : "Open in app full screen"}>
-          {fullScreen ? "⤢ Exit" : "📱 In App"}
+        <button onClick={() => setFullScreen(true)} style={styles.modeButton} title="Open in QuantXDrive full screen">
+          📱 In App
         </button>
         <button onClick={openBrowser} style={styles.browserButton} title="Open PDF in browser">
           🌐 Browser
         </button>
+        {fullScreen && <button onClick={() => setFullScreen(false)} style={styles.exitButton} title="Exit full screen">✕ Exit</button>}
         <span style={styles.divider} />
         <button onClick={() => jump(Math.max(1, current - 1))} disabled={!pages || current <= 1} style={styles.tool}>‹</button>
         <span style={styles.counter}>{pages ? `${current} / ${pages}` : "PDF"}</span>
@@ -136,8 +137,9 @@ const styles = {
   fullScreen: { position: "fixed", inset: 0, width: "100vw", height: "100dvh", zIndex: 99999, borderRadius: 0 },
   toolbar: { flexShrink: 0, minHeight: 48, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "6px 9px", background: "#fff", borderBottom: "1px solid #e5e5eb", flexWrap: "wrap", zIndex: 2 },
   tool: { border: "1px solid #e1e2e8", background: "#f6f7fb", color: "#24243a", borderRadius: 8, minWidth: 34, height: 34, fontSize: 18, fontWeight: 800, cursor: "pointer" },
-  modeButton: { border: 0, background: "#6c63ff", color: "white", borderRadius: 8, height: 34, padding: "0 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
-  browserButton: { border: "1px solid #e1e2e8", background: "#f6f7fb", color: "#24243a", borderRadius: 8, height: 34, padding: "0 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
+  modeButton: { border: 0, background: "#6c63ff", color: "white", borderRadius: 8, height: 34, padding: "0 11px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
+  browserButton: { border: "1px solid #e1e2e8", background: "#f6f7fb", color: "#24243a", borderRadius: 8, height: 34, padding: "0 11px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
+  exitButton: { border: "1px solid #e1e2e8", background: "#fff", color: "#34344a", borderRadius: 8, height: 34, padding: "0 9px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
   divider: { width: 1, height: 24, background: "#e5e5eb", margin: "0 2px" },
   counter: { minWidth: 64, textAlign: "center", fontSize: 12, fontWeight: 800, color: "#34344a" },
   zoom: { minWidth: 42, textAlign: "center", fontSize: 11, fontWeight: 800, color: "#707287" },
