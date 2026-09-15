@@ -11,15 +11,10 @@ function isPdfFrame(frame) {
 
 function restorePdfFrame(host, frame, root) {
   try { root.unmount(); } catch {}
-  host.remove();
   frame.dataset.quantxPdfRestored = "1";
   frame.style.display = "";
   frame.style.visibility = "";
-  if (frame.parentNode == null) {
-    // The original parent can disappear if Channels closes the preview first.
-    return;
-  }
-  frame.parentNode.replaceChild(frame, host);
+  if (host.parentNode) host.replaceWith(frame);
 }
 
 function replacePdfFrame(frame) {
@@ -46,8 +41,6 @@ function replacePdfFrame(frame) {
   const root = createRoot(host);
   roots.set(host, root);
 
-  // Back button lives outside the React reader so it can reliably close the
-  // full-screen overlay and return to the original Channels preview.
   const back = document.createElement("button");
   back.type = "button";
   back.setAttribute("aria-label", "Back to Channels");
