@@ -13,7 +13,10 @@ function PdfPage({ pdf, pageNumber, scale, onVisible }) {
   useEffect(() => {
     const el = hostRef.current;
     if (!el) return;
-    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting || entry.intersectionRatio > 0), { rootMargin: "900px 0px" });
+    const observer = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting || entry.intersectionRatio > 0),
+      { rootMargin: "900px 0px" },
+    );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
@@ -43,11 +46,13 @@ function PdfPage({ pdf, pageNumber, scale, onVisible }) {
     return () => { cancelled = true; };
   }, [pdf, pageNumber, scale, visible, onVisible]);
 
-  return <div ref={hostRef} data-page={pageNumber} style={{ ...styles.page, minHeight: 120 }}>
-    <div style={styles.pageLabel}>Page {pageNumber}</div>
-    {visible ? <canvas ref={canvasRef} style={styles.canvas} /> : <div style={styles.lazy}>Loading when near view…</div>}
-    {error && <div style={styles.pageError}>Unable to render page {pageNumber}: {error}</div>}
-  </div>;
+  return (
+    <div ref={hostRef} data-page={pageNumber} style={{ ...styles.page, minHeight: 120 }}>
+      <div style={styles.pageLabel}>Page {pageNumber}</div>
+      {visible ? <canvas ref={canvasRef} style={styles.canvas} /> : <div style={styles.lazy}>Loading when near view…</div>}
+      {error && <div style={styles.pageError}>Unable to render page {pageNumber}: {error}</div>}
+    </div>
+  );
 }
 
 export default function PdfReader({ url, filename }) {
@@ -57,6 +62,7 @@ export default function PdfReader({ url, filename }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [current, setCurrent] = useState(1);
+  const [fullScreen, setFullScreen] = useState(true);
   const scrollerRef = useRef(null);
 
   useEffect(() => {
@@ -65,7 +71,14 @@ export default function PdfReader({ url, filename }) {
     setLoading(true); setError(""); setPdf(null); setPages(0); setCurrent(1);
     (async () => {
       try {
-        task = pdfjsLib.getDocument({ url, rangeChunkSize: 1024 * 1024, disableAutoFetch: false, disableStream: false, useWorkerFetch: true, isEvalSupported: true });
+        task = pdfjsLib.getDocument({
+          url,
+          rangeChunkSize: 1024 * 1024,
+          disableAutoFetch: false,
+          disableStream: false,
+          useWorkerFetch: true,
+          isEvalSupported: true,
+        });
         const doc = await task.promise;
         if (cancelled) { await doc.destroy(); return; }
         setPdf(doc); setPages(doc.numPages); setLoading(false);
@@ -89,29 +102,43 @@ export default function PdfReader({ url, filename }) {
   }, [pages, scale]);
 
   const jump = n => scrollerRef.current?.querySelector(`[data-page="${n}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const openBrowser = () => window.open(url, "_blank", "noopener,noreferrer");
 
-  return <div style={styles.wrap}>
-    <div style={styles.toolbar}>
-      <button onClick={() => jump(Math.max(1, current - 1))} disabled={!pages || current <= 1} style={styles.tool}>‹</button>
-      <span style={styles.counter}>{pages ? `${current} / ${pages}` : "PDF"}</span>
-      <button onClick={() => jump(Math.min(pages, current + 1))} disabled={!pages || current >= pages} style={styles.tool}>›</button>
-      <button onClick={() => setScale(s => Math.max(.65, +(s - .15).toFixed(2)))} style={styles.tool}>−</button>
-      <span style={styles.zoom}>{Math.round(scale * 100)}%</span>
-      <button onClick={() => setScale(s => Math.min(2.5, +(s + .15).toFixed(2)))} style={styles.tool}>＋</button>
-      <a href={url} download={filename} style={styles.download}>↓ Download</a>
+  return (
+    <div style={{ ...styles.wrap, ...(fullScreen ? styles.fullScreen : {}) }}>
+      <div style={styles.toolbar}>
+        <button onClick={() => setFullScreen(v => !v)} style={styles.modeButton} title={fullScreen ? "Exit full screen" : "Open in app full screen"}>
+          {fullScreen ? "⤢ Exit" : "📱 In App"}
+        </button>
+        <button onClick={openBrowser} style={styles.browserButton} title="Open PDF in browser">
+          🌐 Browser
+        </button>
+        <span style={styles.divider} />
+        <button onClick={() => jump(Math.max(1, current - 1))} disabled={!pages || current <= 1} style={styles.tool}>‹</button>
+        <span style={styles.counter}>{pages ? `${current} / ${pages}` : "PDF"}</span>
+        <button onClick={() => jump(Math.min(pages, current + 1))} disabled={!pages || current >= pages} style={styles.tool}>›</button>
+        <button onClick={() => setScale(s => Math.max(.65, +(s - .15).toFixed(2)))} style={styles.tool}>−</button>
+        <span style={styles.zoom}>{Math.round(scale * 100)}%</span>
+        <button onClick={() => setScale(s => Math.min(2.5, +(s + .15).toFixed(2)))} style={styles.tool}>＋</button>
+        <a href={url} download={filename} style={styles.download}>↓ Download</a>
+      </div>
+      <div ref={scrollerRef} style={styles.scroller}>
+        {loading && <div style={styles.status}>⏳ Opening PDF…</div>}
+        {error && <div style={styles.status}><b>PDF reader error</b><span>{error}</span><a href={url} download={filename} style={styles.download}>↓ Download PDF</a></div>}
+        {!error && pdf && Array.from({ length: pages }, (_, i) => <PdfPage key={`${url}-${i + 1}`} pdf={pdf} pageNumber={i + 1} scale={scale} onVisible={setCurrent} />)}
+      </div>
     </div>
-    <div ref={scrollerRef} style={styles.scroller}>
-      {loading && <div style={styles.status}>⏳ Opening PDF…</div>}
-      {error && <div style={styles.status}><b>PDF reader error</b><span>{error}</span><a href={url} download={filename} style={styles.download}>↓ Download PDF</a></div>}
-      {!error && pdf && Array.from({ length: pages }, (_, i) => <PdfPage key={`${url}-${i + 1}`} pdf={pdf} pageNumber={i + 1} scale={scale} onVisible={setCurrent} />)}
-    </div>
-  </div>;
+  );
 }
 
 const styles = {
   wrap: { width: "100%", height: "100%", minHeight: 0, display: "flex", flexDirection: "column", background: "#171820" },
+  fullScreen: { position: "fixed", inset: 0, width: "100vw", height: "100dvh", zIndex: 99999, borderRadius: 0 },
   toolbar: { flexShrink: 0, minHeight: 48, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "6px 9px", background: "#fff", borderBottom: "1px solid #e5e5eb", flexWrap: "wrap", zIndex: 2 },
   tool: { border: "1px solid #e1e2e8", background: "#f6f7fb", color: "#24243a", borderRadius: 8, minWidth: 34, height: 34, fontSize: 18, fontWeight: 800, cursor: "pointer" },
+  modeButton: { border: 0, background: "#6c63ff", color: "white", borderRadius: 8, height: 34, padding: "0 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
+  browserButton: { border: "1px solid #e1e2e8", background: "#f6f7fb", color: "#24243a", borderRadius: 8, height: 34, padding: "0 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" },
+  divider: { width: 1, height: 24, background: "#e5e5eb", margin: "0 2px" },
   counter: { minWidth: 64, textAlign: "center", fontSize: 12, fontWeight: 800, color: "#34344a" },
   zoom: { minWidth: 42, textAlign: "center", fontSize: 11, fontWeight: 800, color: "#707287" },
   download: { marginLeft: 4, borderRadius: 8, padding: "9px 11px", background: "#6c63ff", color: "white", textDecoration: "none", fontSize: 11, fontWeight: 800 },
