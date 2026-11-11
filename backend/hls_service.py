@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import secrets
+import shutil
 from pathlib import Path
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -72,6 +73,11 @@ async def _ensure_ffmpeg() -> str:
         return FFMPEG_PATH
     async with FFMPEG_LOCK:
         if FFMPEG_PATH:
+            return FFMPEG_PATH
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg and await _ffmpeg_supports_range_options(system_ffmpeg):
+            FFMPEG_PATH = system_ffmpeg
+            print(f"🎬 Using system FFmpeg: {FFMPEG_PATH}", flush=True)
             return FFMPEG_PATH
         bundled = str(FFMPEG_BINARY)
         if not FFMPEG_BINARY.is_file() or not os.access(bundled, os.X_OK):
