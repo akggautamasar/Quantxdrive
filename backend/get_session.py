@@ -1,20 +1,33 @@
-"""
-Run this ONCE in Termux to get your SESSION_STRING for Render deployment.
-Copy the output and paste it into Render's SESSION_STRING env var.
+"""Generate a dedicated Pyrogram StringSession without printing credentials.
 
-Usage:
-    python3 get_session.py
+Run on Oracle from backend directory:
+    .venv/bin/python get_session.py
+
+The session is saved to ~/.config/quantxdrive/session.txt (mode 0600).
+Copy its contents securely into SESSION_STRING in the backend environment file.
 """
+import getpass
+import os
+from pathlib import Path
 from pyrogram import Client
 
-api_id = 26182818
-api_hash = "e98cc55fabed0fce53269188fa3a0e63"
+def main():
+    api_id = int(os.environ.get("API_ID") or input("Telegram API ID: ").strip())
+    api_hash = os.environ.get("API_HASH") or getpass.getpass("Telegram API hash (hidden): ").strip()
+    if not api_hash:
+        raise SystemExit("API hash is required")
+    directory = Path.home() / ".config" / "quantxdrive"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    target = directory / "session.txt"
+    if target.exists():
+        raise SystemExit(f"Session file already exists: {target}. Refusing to overwrite.")
+    with Client("quantxdrive_session_generator", api_id=api_id, api_hash=api_hash, in_memory=True) as app:
+        session = app.export_session_string()
+    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(session + "\n")
+    print(f"Session securely saved to {target}. Do not share its contents.")
 
-with Client("temp_session", api_id=api_id, api_hash=api_hash) as app:
-    session_string = app.export_session_string()
-    print("\n" + "="*60)
-    print("YOUR SESSION STRING (copy everything below):")
-    print("="*60)
-    print(session_string)
-    print("="*60)
-    print("\nPaste this as SESSION_STRING in Render environment variables.\n")
+if __name__ == "__main__":
+    main()
