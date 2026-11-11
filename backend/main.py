@@ -13,12 +13,16 @@ import db
 
 load_dotenv()
 
-API_ID         = int(os.getenv("API_ID", "26182818"))
-API_HASH       = os.getenv("API_HASH", "e98cc55fabed0fce53269188fa3a0e63")
-JWT_SECRET     = os.getenv("JWT_SECRET", "airdrive_secret_change_this")
-APP_PASSWORD   = os.getenv("APP_PASSWORD", "Airlocked@6279")
+API_ID         = int(os.getenv("API_ID", "0"))
+API_HASH       = os.getenv("API_HASH", "")
+JWT_SECRET     = os.getenv("JWT_SECRET", "")
+APP_PASSWORD   = os.getenv("APP_PASSWORD", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")  # Optional: Telegram bot in your channels → enables CDN redirect
+CORS_ORIGINS = [origin.strip().rstrip("/") for origin in os.getenv("CORS_ORIGINS", "https://quantxdrive.vercel.app").split(",") if origin.strip()]
+
+if not API_ID or not API_HASH or not SESSION_STRING or not APP_PASSWORD or len(JWT_SECRET) < 32:
+    raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, APP_PASSWORD and JWT_SECRET (at least 32 characters) in the backend environment")
 
 CHANNELS = {
     "call_recordings": -1004274179262,
@@ -113,7 +117,7 @@ async def lifespan(app: FastAPI):
     await _http_client.aclose()
 
 app = FastAPI(title="AirDrive API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"],
                    expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"])
 security = HTTPBearer(auto_error=False)
@@ -142,7 +146,7 @@ async def ping():
 
 @app.post("/api/login")
 async def login(body: dict):
-    if body.get("password") != APP_PASSWORD:
+    if not isinstance(body.get("password"), str) or not secrets.compare_digest(body["password"], APP_PASSWORD):
         raise HTTPException(status_code=401, detail="Wrong password")
     return {"token": create_token()}
 
