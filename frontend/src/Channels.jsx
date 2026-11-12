@@ -23,6 +23,35 @@ function Setup({ token, channels, reload, onClose }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [dialogs, setDialogs] = useState([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [adding, setAdding] = useState(null);
+  const discover = async () => {
+    setDiscovering(true); setErr("");
+    try {
+      const r = await fetch(`${API}/api/telegram/dialogs`, { headers: { Authorization: `Bearer ${token}` } });
+      const d = await r.json();
+      if (!r.ok) throw Error(d.detail || "Unable to discover Telegram chats");
+      setDialogs(d.dialogs || []);
+    } catch (e) { setErr(e.message); }
+    finally { setDiscovering(false); }
+  };
+  const addDiscovered = async chat => {
+    setAdding(chat.id); setErr("");
+    try {
+      const r = await fetch(`${API}/api/channels`, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ channel_id: String(chat.id), name: chat.title })
+      });
+      const d = await r.json();
+      if (!r.ok) throw Error(d.detail || "Could not add chat");
+      setDialogs(old => old.map(c => c.id === chat.id ? { ...c, configured: true } : c));
+      await reload();
+    } catch (e) { setErr(e.message); }
+    finally { setAdding(null); }
+  };
 
   const add = async () => {
     if (!id.trim()) return;
@@ -49,18 +78,45 @@ function Setup({ token, channels, reload, onClose }) {
   return <div style={S.overlay} onClick={onClose}>
     <div style={S.setup} onClick={e => e.stopPropagation()}>
       <div style={S.head}>
-        <div><b>⚙️ Channel Settings</b><p style={S.muted}>Add Telegram channel IDs that the connected Telegram account can access.</p></div>
+        <div><b>⚙️ Channel Settings</b><p style={S.muted}>Discover chats from your connected Telegram account or add one manually.</p></div>
         <button style={S.x} onClick={onClose}>✕</button>
       </div>
-      <div style={S.note}>ℹ️ The account behind <b>SESSION_STRING</b> must be a member/admin of the channel. If you use a Telegram bot, add that bot to the channel with the required access.</div>
+      <div style={S.note}>ℹ️ Your connected Telegram session can browse chats it can access. Only chats you explicitly add will be indexed when you press Sync.</div>
       <div style={S.form}>
         <input value={id} onChange={e => setId(e.target.value)} placeholder="Channel ID, e.g. -1001234567890" style={S.input}/>
         <input value={name} onChange={e => setName(e.target.value)} placeholder="Display name (optional)" style={S.input}/>
         <button disabled={busy || !id.trim()} onClick={add} style={S.primary}>{busy ? "⏳ Checking access…" : "＋ Add Channel"}</button>
       </div>
       {err && <div style={S.error}>❌ {err}</div>}
+      <div style={{ marginTop: 18, borderTop: "1px solid #e8eaf2", paddingTop: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <b style={{ fontSize: 13 }}>Chats from your Telegram session</b>
+          <button style={S.primary} disabled={discovering} onClick={discover}>{discovering ? "⏳ Loading…" : "🔎 Discover all chats"}</button>
+        </div>
+        <p style={S.muted}>Channels, groups, bots, private chats and Saved Messages. Discovery does not copy messages or files.</p>
+        {dialogs.length > 0 && <>
+          <div style={{ ...S.form, flexDirection: "row", flexWrap: "wrap" }}>
+            <input style={{ ...S.input, flex: 1 }} placeholder="Search chats…" value={search} onChange={e => setSearch(e.target.value)}/>
+            <select style={S.select} value={filter} onChange={e => setFilter(e.target.value)}>
+              <option value="all">All chats</option><option value="channel">Channels</option>
+              <option value="group">Groups</option><option value="private">Private</option>
+              <option value="bot">Bots</option>
+            </select>
+          </div>
+          <p style={S.muted}>{dialogs.length} accessible chats found</p>
+          <div style={{ maxHeight: 300, overflowY: "auto" }}>
+            {dialogs.filter(c => (filter === "all" || (filter === "group" ? ["group","supergroup"].includes(c.type) : filter === "private" ? ["private","bot"].includes(c.type) : c.type === filter)) && (c.title.toLowerCase().includes(search.toLowerCase()) || String(c.id).includes(search))).map(c =>
+              <div key={c.id} style={S.channelRow}>
+                <span style={{ fontSize: 21 }}>{c.type === "channel" ? "📺" : ["group","supergroup"].includes(c.type) ? "👥" : c.type === "bot" ? "🤖" : "💬"}</span>
+                <div style={{ flex: 1, minWidth: 0 }}><b style={S.ellipsis}>{c.title}</b><p style={S.muted}>{c.type} · {c.id}</p></div>
+                <button style={c.configured ? S.settings : S.primary} disabled={c.configured || adding === c.id} onClick={() => addDiscovered(c)}>{c.configured ? "Added" : adding === c.id ? "Adding…" : "＋ Add"}</button>
+              </div>
+            )}
+          </div>
+        </>}
+      </div>
       <div style={{ marginTop: 16 }}><b style={{ fontSize: 13 }}>Configured channels</b>
-        {channels.length === 0 ? <p style={S.empty}>No channels configured yet.</p> : channels.map(c =>
+        {channels.length === 0 ? <p style={S.empty}>No chats added yet.</p> : channels.map(c =>
           <div key={c.id} style={S.channelRow}><span style={{ fontSize: 22 }}>📺</span><div style={{ flex: 1, minWidth: 0 }}><b style={S.ellipsis}>{c.title || c.id}</b><p style={S.muted}>{c.id}{c.username ? ` · @${c.username}` : ""}</p></div><button onClick={() => remove(c.id)} style={S.remove}>Remove</button></div>
         )}
       </div>
@@ -208,8 +264,8 @@ export default function Channels({ token, onClose }) {
   useEffect(() => { reload(); }, [reload]);
   if (selected) return <ChannelFiles token={token} channel={selected} onBack={() => { setSelected(null); reload(); }}/>;
   return <div style={S.overlay} onClick={onClose}><div style={S.panel} onClick={e => e.stopPropagation()}>
-    <div style={S.head}><div><b style={S.title}>📺 Channels</b><p style={S.muted}>Browse Telegram channel media inside QuantXDrive</p></div><div style={{ display: "flex", gap: 7 }}><button onClick={() => setSettings(true)} style={S.settings}>⚙ Settings</button><button style={S.x} onClick={onClose}>✕</button></div></div>
-    {loading ? <div style={S.center}>⏳ Loading channels…</div> : channels.length === 0 ? <div style={S.center}><span style={{ fontSize: 60 }}>📺</span><b>No channels configured</b><span style={S.muted}>Open Settings and add a Telegram channel ID.</span><button onClick={() => setSettings(true)} style={S.primary}>⚙ Setup Channels</button></div> : <div style={S.channelGrid}>{channels.map(c => <button key={c.id} onClick={() => setSelected(c)} style={S.channelCard}><span style={{ fontSize: 34 }}>📺</span><span style={{ fontWeight: 900, color: "#1a1a2e", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}>{c.title || c.id}</span><span style={S.muted}>{c.id}</span><span style={S.open}>{c.files ? `${c.files} files` : "Open channel →"}</span></button>)}</div>}
+    <div style={S.head}><div><b style={S.title}>💬 Telegram Chats</b><p style={S.muted}>Browse media from channels, groups and conversations</p></div><div style={{ display: "flex", gap: 7 }}><button onClick={() => setSettings(true)} style={S.settings}>⚙ Settings</button><button style={S.x} onClick={onClose}>✕</button></div></div>
+    {loading ? <div style={S.center}>⏳ Loading channels…</div> : channels.length === 0 ? <div style={S.center}><span style={{ fontSize: 60 }}>📺</span><b>No chats added</b><span style={S.muted}>Open Settings to discover your Telegram conversations.</span><button onClick={() => setSettings(true)} style={S.primary}>⚙ Setup Channels</button></div> : <div style={S.channelGrid}>{channels.map(c => <button key={c.id} onClick={() => setSelected(c)} style={S.channelCard}><span style={{ fontSize: 34 }}>📺</span><span style={{ fontWeight: 900, color: "#1a1a2e", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}>{c.title || c.id}</span><span style={S.muted}>{c.id}</span><span style={S.open}>{c.files ? `${c.files} files` : "Open channel →"}</span></button>)}</div>}
     {settings && <Setup token={token} channels={channels} reload={reload} onClose={() => setSettings(false)}/>} 
   </div></div>;
 }
