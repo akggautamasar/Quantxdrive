@@ -237,6 +237,34 @@ def register_routes(app):
     import main
     _install_media_bridge()
 
+    @app.get("/api/telegram/dialogs")
+    async def discover_telegram_dialogs(_: bool = Depends(main.verify_token)):
+        """Read accessible dialogs from the session; do not sync or persist messages."""
+        if not main.pyro_client:
+            raise HTTPException(status_code=503, detail="Telegram session is not ready")
+        dialogs = []
+        try:
+            async for dialog in main.pyro_client.get_dialogs():
+                chat = dialog.chat
+                if not chat:
+                    continue
+                kind = str(getattr(chat, "type", "unknown")).split(".")[-1].lower()
+                title = getattr(chat, "title", None) or " ".join(
+                    part for part in (getattr(chat, "first_name", None), getattr(chat, "last_name", None)) if part
+                ) or "Saved Messages" if getattr(chat, "is_self", False) else (
+                    getattr(chat, "title", None) or " ".join(
+                        part for part in (getattr(chat, "first_name", None), getattr(chat, "last_name", None)) if part
+                    ) or str(chat.id)
+                )
+                dialogs.append({
+                    "id": int(chat.id), "title": title,
+                    "username": getattr(chat, "username", None) or "",
+                    "type": kind, "configured": _channel_config(int(chat.id)) is not None,
+                })
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not read Telegram dialogs: {type(exc).__name__}")
+        return {"dialogs": dialogs, "total": len(dialogs)}
+
     @app.get("/api/channels")
     async def list_channels(_: bool = Depends(main.verify_token)):
         return {"channels": db._index.get("channels", [])}
